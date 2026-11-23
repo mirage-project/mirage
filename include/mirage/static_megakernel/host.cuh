@@ -173,11 +173,17 @@ static void map_act8_kt(CUtensorMap *m,
                                 CU_TENSOR_MAP_L2_PROMOTION_NONE,
                                 CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
 }
-// e4m3 [rows, Kb]; box {128, T} (T rows: the tokens of a step)
-static void map_act8(CUtensorMap *m, void *base, uint64_t Kb, uint64_t rows) {
+// e4m3 [rows, Kb]; box {128, T} (T rows: the tokens of a step), or {128,
+// box_rows} (act8r: DeepSeek-V4.1's swiglu_moe_experts -DMOE_CMP, 1 row for
+// tile::gather4 or a vslot's rows)
+static void map_act8(CUtensorMap *m,
+                     void *base,
+                     uint64_t Kb,
+                     uint64_t rows,
+                     uint32_t box_rows = (uint32_t)T) {
   cuuint64_t gd[2] = {Kb, rows};
   cuuint64_t gs[1] = {Kb};
-  cuuint32_t bd[2] = {128, (cuuint32_t)T}, es[2] = {1, 1};
+  cuuint32_t bd[2] = {128, box_rows}, es[2] = {1, 1};
   MKS_CU(cuTensorMapEncodeTiled(m,
                                 CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                 2,
@@ -480,6 +486,10 @@ static void build_map(Maps &maps,
     map_act8(&maps.m[i], p, u(2), u(3));
   } else if (kind == "act8kt" && m.size() == 5) {
     map_act8_kt(&maps.m[i], p, u(2), u(3), (uint32_t)u(4));
+  } else if (kind == "act8r" && m.size() == 5) { // (box rows)
+    map_act8(&maps.m[i], p, u(2), u(3), (uint32_t)u(4));
+  } else if (kind == "act8ktr" && m.size() == 6) { // (K tiles, box rows)
+    map_act8_kt(&maps.m[i], p, u(2), u(3), (uint32_t)u(4), (uint32_t)u(5));
   } else if (kind == "w8kt" && m.size() == 5) {
     map_act8_kt(&maps.m[i], p, u(2), u(3), (uint32_t)u(4), 128);
   } else {

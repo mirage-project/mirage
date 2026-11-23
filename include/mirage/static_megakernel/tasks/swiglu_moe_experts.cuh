@@ -590,6 +590,711 @@ __device__ __forceinline__ void phase_switch(unsigned long long const *pairs,
   __syncthreads();
 }
 
+#ifdef MOE_CMP
+// ---- (11-23, default off) -DMOE_CMP=16 at T >= 32: an expert slot's own
+// tokens only. build_table's slots are cut into virtual slots of at most NC
+// tokens (split_slots: vslot v = an expert and its tokens tok[start[v] ..
+// + ntok[v])). A W13 item (v, m) and a W2 tile (v, ot) run MMA N = 8 ceil(n /
+// 8) (n = ntok[v]) instead of N = T: the W13 stage holds the vslot's x_q rows
+// (tile::gather4 of 4 rows, rows past n repeat the first token), the W2 stage
+// the vslot's NC h_q rows (h_q row v NC + c: the vslot's c-th token). Its own
+// ring (CSMAX stages of CFST bytes: 2 weight pieces + 2 K tiles x NC rows, in
+// the layer ring's area) and barriers (cbars). B scales: W13 per stage from
+// x_q's KT_LAT scale chunks kept in shared memory (OFF_ZSF; the owning issuer
+// writes line c word 0 = token c's word into the stage's chunk, OFF_CBSF), W2
+// by TMA (h_q's chunks, line c = place c). TMEM: accumulators T-wise as
+// ACC_STAGES ticks of NC columns, the weight scales of (st, at) at TM_CW +
+// 4 (2 st + at), the B scales at TM_CB + 4 (2 st + at). A token's results
+// are those of the N = T build (its column's math does not depend on the
+// others; the h_q / routed rows are the same bytes).
+namespace cmp {
+#ifndef MOE_CMP_MIN_T
+#define MOE_CMP_MIN_T 32
+#endif
+constexpr int NC = MOE_CMP;
+static_assert(NC == 16, "MOE_CMP: 16-token virtual slots");
+constexpr bool ON = T >= MOE_CMP_MIN_T && T >= 16; // (-DMOE_CMP_MIN_T: 16 or 32)
+#ifndef MOE_CMP_ST
+#define MOE_CMP_ST 5
+#endif
+constexpr int CFST = W_STAGE + 2 * NC * 128, CSMAX = MOE_CMP_ST;
+static_assert(CFST % 1024 == 0 && CSMAX >= 2, "MOE_CMP: 1024-B stages");
+constexpr int TM_CW = 128, TM_CB = TM_CW + 8 * CSMAX;
+static_assert(2 * ACC_STAGES * NC <= TM_CW && TM_CB + 8 * CSMAX <= 512,
+              "MOE_CMP: TMEM columns");
+__device__ __forceinline__ uint64_t *cbars() {
+  __shared__ __align__(8) uint64_t b[2 * CSMAX];
+  return b;
+}
+__device__ __forceinline__ uint32_t cfull(int st) {
+  return su32(cbars() + st);
+}
+__device__ __forceinline__ uint32_t cempty(int st) {
+  return su32(cbars() + CSMAX + st);
+}
+// kind::mxf8f6f4 e2m1 x e4m3, N = n (a multiple of 8), scale id sf
+__device__ __forceinline__ uint32_t idesc_n(int n, uint32_t sf) {
+  return idesc_mx((IDESC_MX & ~(0x3Fu << 17)) | ((uint32_t)(n / 8) << 17), sf);
+}
+// tile::gather4: rows r0..r3 (8 bits each in rows4) x the 128-B K tile at byte
+// column c0 -> 4 x 128 B at sm (SW128 by address, as one box of rows would)
+__device__ __forceinline__ void tma_gather4(void const *d,
+                                            uint32_t mb,
+                                            uint32_t sm,
+                                            int c0,
+                                            uint32_t rows4,
+                                            uint64_t hint) {
+  asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.tile::gather4."
+               "mbarrier::complete_tx::bytes.L2::cache_hint"
+               " [%0], [%1, {%3, %4, %5, %6, %7}], [%2], %8;" ::"r"(sm),
+               "l"((uint64_t)d),
+               "r"(mb),
+               "r"(c0),
+               "r"(rows4 & 0xffu),
+               "r"((rows4 >> 8) & 0xffu),
+               "r"((rows4 >> 16) & 0xffu),
+               "r"(rows4 >> 24),
+               "l"(hint)
+               : "memory");
+}
+// shared memory (from the dynamic base): the stages (past the layer ring's
+// area when CSMAX x CFST > OFF_WSF: only this task uses it then), 2 weight
+// scale chunks a stage, 2 B scale chunks a stage, x_q's scales token-major
+// (word t KT_LAT + kt: token t's 4 bytes of K tile kt), the W13 epilogue's
+// 128 x NC fp32
+template <class RES>
+struct CSmem {
+  static constexpr int OFF_CWSF = CSMAX * CFST,
+                       OFF_CBSF = OFF_CWSF + CSMAX * 2 * SF_CHUNK,
+                       OFF_ZSF = OFF_CBSF + CSMAX * 2 * SF_CHUNK,
+                       OFF_CACC = OFF_ZSF + T * RES::KT_LAT * 4,
+                       BYTES = OFF_CACC + 128 * NC * 4;
+  static_assert(RES::KT_LAT * SF_CHUNK <= OFF_CWSF,
+                "MOE_CMP: x_q's scale chunks staged in the stages' area");
+};
+// the maps the compact path adds (the node's map slots 15..17): x_q rows for
+// tile::gather4 (box 128 B x 1 row), h_q 2 K tiles x NC rows, h_q 1 K tile x NC
+// rows
+template <class MAP_SLOTS>
+struct CMaps {
+  static constexpr int ZQG = slot_at<MAP_SLOTS, 15>(),
+                       HQC_KT = slot_at<MAP_SLOTS, 16>(),
+                       HQC_A8 = slot_at<MAP_SLOTS, 17>();
+};
+
+// after build_table (256 threads): slot s of n tokens -> ceil(n / NC) vslots
+// in place (the same expert, NC consecutive entries each; the last the rest),
+// s_ints[1] = the vslot count
+template <class RES>
+__device__ __forceinline__ void split_slots() {
+  constexpr int PER = (RES::NSLOT + 255) / 256, K = RES::K;
+  int *const eid_s = RES::eid(), *const ntok_s = RES::ntok(),
+             *const start_s = RES::start();
+  int const n_live = s_ints[1], warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  // 0. a slot's entries in token order, the same on every SM (build_table
+  // places them by a shared atomic: an order that differs from SM to SM, while
+  // a vslot's tokens and its h_q rows must agree across the SMs that run its
+  // W13 items and W2 tiles): per slot a T-bit mask of its tokens (fill / cnt_e
+  // as scratch: build_table is done with them), a pair's place = the bits
+  // below its token
+  {
+    static_assert(T <= 64 && RES::NE >= RES::NSLOT, "MOE_CMP: 64-bit masks");
+    unsigned *const mlo = reinterpret_cast<unsigned *>(RES::fill()),
+                    *const mhi = reinterpret_cast<unsigned *>(RES::cnt_e());
+    int *const sel_ss = RES::sel(), *const tok_s = RES::tok();
+    float *const wsel_ss = RES::wsel(), *const w_s = RES::wt();
+    unsigned char *const kk_s = RES::kk();
+    for (int i = threadIdx.x; i < n_live; i += 256) {
+      mlo[i] = 0u;
+      mhi[i] = 0u;
+    }
+    __syncthreads();
+    for (int i = threadIdx.x; i < RES::NPAIR; i += 256) {
+      int const t = i / K;
+      atomicOr(t < 32 ? &mlo[sel_ss[i]] : &mhi[sel_ss[i]], 1u << (t & 31));
+    }
+    __syncthreads();
+    for (int i = threadIdx.x; i < RES::NPAIR; i += 256) {
+      int const s = sel_ss[i], t = i / K;
+      unsigned const lo = mlo[s], hi = mhi[s];
+      int const pos = t < 32 ? __popc(lo & ((1u << t) - 1u))
+                             : __popc(lo) + __popc(hi & ((1u << (t - 32)) - 1u));
+      int const e_ = start_s[s] + pos;
+      tok_s[e_] = t;
+      w_s[e_] = wsel_ss[i];
+      kk_s[e_] = (unsigned char)(i % K);
+    }
+    __syncthreads();
+  }
+  int ex[PER], nt[PER], s0[PER], nv[PER], tot = 0;
+#pragma unroll
+  for (int q = 0; q < PER; q++) {
+    int const i = threadIdx.x * PER + q;
+    bool const live = i < n_live;
+    ex[q] = live ? eid_s[i] : 0;
+    nt[q] = live ? ntok_s[i] : 0;
+    s0[q] = live ? start_s[i] : 0;
+    nv[q] = (nt[q] + NC - 1) / NC;
+    tot += nv[q];
+  }
+  int inc = tot;
+#pragma unroll
+  for (int o = 1; o < 32; o <<= 1) {
+    int const u = __shfl_up_sync(0xffffffffu, inc, o);
+    if (lane >= o) {
+      inc += u;
+    }
+  }
+  __syncthreads(); // every thread has read its slots (before any write)
+  if (lane == 31) {
+    s_ints[24 + warp] = inc;
+  }
+  __syncthreads();
+  int base = inc - tot, all = 0;
+  for (int w_ = 0; w_ < 8; w_++) {
+    int const sw = s_ints[24 + w_];
+    base += (w_ < warp) ? sw : 0;
+    all += sw;
+  }
+#pragma unroll
+  for (int q = 0; q < PER; q++) {
+    for (int j = 0; j < nv[q]; j++, base++) {
+      eid_s[base] = ex[q];
+      start_s[base] = s0[q] + j * NC;
+      ntok_s[base] = (nt[q] - j * NC < NC) ? nt[q] - j * NC : NC;
+    }
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    s_ints[1] = all;
+  }
+  __syncthreads();
+}
+
+// W13 loader par (0: even stages, warp 0; 1: odd, warp 7) of item (v, mt),
+// stages [s0, s1): the 2 weight pieces + their scale chunks, per K tile N / 4
+// tile::gather4 of the vslot's x_q rows. g: this loader's stage counter
+template <class RES, class CM>
+__device__ __forceinline__ void load_w13c(Maps const &maps,
+                                          uint32_t base,
+                                          int &g,
+                                          int par,
+                                          int v,
+                                          int mt,
+                                          int s0,
+                                          int s1) {
+  constexpr int KT_LAT = RES::KT_LAT, NST = KT_LAT / 2;
+  static_assert(KT_LAT % 2 == 0, "MOE_CMP: whole 2-piece W13 stages");
+  int const n = RES::ntok()[v], N = (n + 7) & ~7, nq = N >> 2;
+  int const *const tk = RES::tok() + RES::start()[v];
+  uint32_t rows[NC / 4];
+#pragma unroll
+  for (int q = 0; q < NC / 4; q++) {
+    uint32_t r = 0;
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+      int const c = 4 * q + i;
+      r |= (uint32_t)tk[c < n ? c : 0] << (8 * i);
+    }
+    rows[q] = r;
+  }
+  int const tile0 = RES::eid()[v] * (RES::MT13 * KT_LAT) + mt * KT_LAT;
+  int const send = NST < s1 ? NST : s1;
+  int st = g % CSMAX;
+  uint32_t ph = ((g / CSMAX) - 1) & 1;
+  for (int s = s0; s < send; s++, g++) {
+    if ((s & 1) == par) {
+      if (g >= CSMAX) {
+        mbar_wait(cempty(st), ph);
+      }
+      uint32_t const full = cfull(st), dst = base + st * CFST;
+      mbar_expect(full, 2 * (8192 + SF_CHUNK) + 2 * N * 128);
+      tma3(&maps.m[RES::W13X2], full, dst, 0, 0, tile0 + 2 * s, EVICT_FIRST);
+      tma3(&maps.m[RES::W13SFX2],
+           full,
+           base + CSmem<RES>::OFF_CWSF + st * 2 * SF_CHUNK,
+           0,
+           0,
+           tile0 + 2 * s,
+           EVICT_FIRST);
+#pragma unroll
+      for (int at = 0; at < 2; at++) {
+#pragma unroll
+        for (int q = 0; q < NC / 4; q++) {
+          if (q < nq) {
+            tma_gather4(&maps.m[CM::ZQG],
+                        full,
+                        dst + W_STAGE + at * (NC * 128) + 512 * q,
+                        (2 * s + at) * 128,
+                        rows[q],
+                        EVICT_LAST);
+          }
+        }
+      }
+    }
+    if (++st == CSMAX) {
+      st = 0;
+      ph ^= 1u;
+    }
+  }
+}
+
+// W2 loader par of tile (v, ot): load_w2_job's stages on the compact ring, the
+// vslot's NC h_q rows
+template <class RES, class CM>
+__device__ __forceinline__ void load_w2c(Maps const &maps,
+                                         G const &g,
+                                         uint32_t base,
+                                         int &gq,
+                                         int par,
+                                         int v,
+                                         int ot,
+                                         int &chk) {
+  constexpr int KT2 = RES::KT2, NST = RES::NST2;
+  int st = gq % CSMAX;
+  uint32_t ph = ((gq / CSMAX) - 1) & 1;
+  int const p0 = RES::eid()[v] * (RES::OT2 * KT2) + ot * KT2;
+  for (int s = 0; s < NST; s++, gq++) {
+    if ((s & 1) == par) {
+      if (gq >= CSMAX) {
+        mbar_wait(cempty(st), ph);
+      }
+      int const na = (KT2 - 2 * s < 2) ? KT2 - 2 * s : 2;
+      uint32_t const full = cfull(st), dst = base + st * CFST,
+                     sf_dst = base + CSmem<RES>::OFF_CWSF + st * 2 * SF_CHUNK,
+                     hsf_dst = base + CSmem<RES>::OFF_CBSF + st * 2 * SF_CHUNK;
+      mbar_expect(full, na * (8192 + SF_CHUNK + NC * 128 + SF_CHUNK));
+      if (na == 2) {
+        tma3(&maps.m[RES::W2X2], full, dst, 0, 0, p0 + 2 * s, EVICT_FIRST);
+        tma3(&maps.m[RES::W2SFX2], full, sf_dst, 0, 0, p0 + 2 * s, EVICT_FIRST);
+      } else {
+        tma3(&maps.m[RES::W2], full, dst, 0, 0, p0 + 2 * s, EVICT_FIRST);
+        tma3(&maps.m[RES::W2SF], full, sf_dst, 0, 0, p0 + 2 * s, EVICT_FIRST);
+      }
+      if (v != chk) {
+        cnt_wait(g.cnt + RES::CHQ + v, RES::MT13);
+        asm volatile("fence.proxy.async.global;" ::: "memory");
+        chk = v;
+      }
+      if (na == 2) {
+        tma3(&maps.m[CM::HQC_KT],
+             full,
+             dst + W_STAGE,
+             0,
+             v * NC,
+             2 * s,
+             EVICT_LAST);
+        tma3(&maps.m[RES::HQ_SF2],
+             full,
+             hsf_dst,
+             0,
+             0,
+             v * KT2 + 2 * s,
+             EVICT_LAST);
+      } else {
+        tma2(&maps.m[CM::HQC_A8],
+             full,
+             dst + W_STAGE,
+             2 * s * 128,
+             v * NC,
+             EVICT_LAST);
+        tma3(&maps.m[RES::HQ_SF],
+             full,
+             hsf_dst,
+             0,
+             0,
+             v * KT2 + 2 * s,
+             EVICT_LAST);
+      }
+    }
+    if (++st == CSMAX) {
+      st = 0;
+      ph ^= 1u;
+    }
+  }
+}
+
+// issuer iss (a whole warp, one elected lane issues) of a W13 item (v, mt) or a
+// W2 tile (v, ot): its stages with s % 2 == iss into accumulator half iss of
+// tick a, N = 8 ceil(ntok[v] / 8). W13: before a stage's MMAs, lanes 0..15
+// (at 0) and 16..31 (at 1) write line c = lane % 16 word 0 of the stage's B
+// scale chunk: token c's x_q scale word of K tile 2 s + at (rows past n: the
+// first token's)
+template <class RES, bool W13>
+__device__ __forceinline__ void
+    issue_c(uint32_t base, uint32_t tb, int iss, int &g, int a, int v) {
+  constexpr int NST = W13 ? RES::KT_LAT / 2 : RES::NST2, KT2 = RES::KT2;
+  int const n = RES::ntok()[v], N = (n + 7) & ~7, lane = threadIdx.x & 31,
+            c = lane & 15, atl = lane >> 4;
+  int const tc = RES::tok()[RES::start()[v] + (c < n ? c : 0)];
+  uint32_t const zsrc = base + CSmem<RES>::OFF_ZSF + 4 * (tc * RES::KT_LAT);
+  uint32_t const acc = tb + NC * a + ACC_STAGES * NC * iss;
+  bool first = true;
+  for (int s = 0; s < NST; s++, g++) {
+    bool const mine = (s & 1) == iss;
+    int const st = g % CSMAX;
+    mbar_wait(cfull(st), (g / CSMAX) & 1);
+    fence_after();
+    if (!mine) {
+      if (issuer_lane<true>()) {
+        mbar_arrive(cempty(st));
+      }
+      continue;
+    }
+    if constexpr (W13) {
+      uint32_t w;
+      asm volatile("ld.shared.u32 %0, [%1];"
+                   : "=r"(w)
+                   : "r"(zsrc + 4 * (2 * s + atl)));
+      asm volatile("st.shared.u32 [%0], %1;" ::"r"(
+                       base + CSmem<RES>::OFF_CBSF +
+                       (st * 2 + atl) * SF_CHUNK + 16 * c),
+                   "r"(w)
+                   : "memory");
+      asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+    }
+    bool const one = issuer_lane<true>();
+    int const na = W13 ? 2 : ((KT2 - 2 * s < 2) ? KT2 - 2 * s : 2);
+    for (int at = 0; at < na; at++) {
+      uint32_t const sfa = tb + TM_CW + 4 * (st * 2 + at),
+                     sfb = tb + TM_CB + 4 * (st * 2 + at);
+      if (one) {
+        cp_sf(sfa, base + CSmem<RES>::OFF_CWSF + (st * 2 + at) * SF_CHUNK);
+        cp_sf(sfb, base + CSmem<RES>::OFF_CBSF + (st * 2 + at) * SF_CHUNK);
+      }
+      uint64_t const dw = mkdesc(base + st * CFST + at * 16384);
+      uint64_t const db = mkdesc(base + st * CFST + W_STAGE + at * (NC * 128));
+      if (one) {
+        mma_mx(acc, dw, db, idesc_n(N, 0), first ? 0u : 1u, sfa, sfb);
+        mma_mx(acc, dw + 2, db + 2, idesc_n(N, 1), 1u, sfa, sfb);
+        mma_mx(acc, dw + 4, db + 4, idesc_n(N, 2), 1u, sfa, sfb);
+        mma_mx(acc, dw + 6, db + 6, idesc_n(N, 3), 1u, sfa, sfb);
+      }
+      first = false;
+    }
+    if (one) {
+      tc_commit(cempty(st));
+    }
+  }
+  if (issuer_lane<true>()) {
+    tc_commit(rt.acc_full0 + 8 * a); // `acc_full` count 2: both issuers
+  }
+}
+
+// epilogue: wait for tick a, add the two issuers' halves -> v[NC] of this
+// thread's row (TMEM lane)
+__device__ __forceinline__ int drain_c(uint32_t tb, int a, int parity, float *v) {
+  int const lgrp = (threadIdx.x >> 5) & 3, lane = threadIdx.x & 31;
+  mbar_wait(rt.acc_full0 + 8 * a, parity);
+  fence_after();
+  float v2[NC];
+  tmem_ld_cols_nw<NC>(tb + NC * a + ((uint32_t)(lgrp * 32) << 16), v);
+  tmem_ld_cols_nw<NC>(tb + NC * a + ACC_STAGES * NC + ((uint32_t)(lgrp * 32) << 16),
+                      v2);
+  tmem_keep_cols<NC>(v);
+  tmem_keep_cols<NC>(v2);
+#pragma unroll
+  for (int c = 0; c < NC; c++) {
+    v[c] += v2[c];
+  }
+  fence_before();
+  mbar_arrive(rt.acc_empty0 + 8 * a); // 128 arrivals
+  return lgrp * 32 + lane;
+}
+
+// the phase switch of the compact path: fresh ring barriers (the layer's and
+// cbars), x_q's KT_LAT scale chunks staged in the (idle) stages' area, then
+// token-major -> OFF_ZSF (kept for the phase), the routing pairs
+template <class RES>
+__device__ __forceinline__ void phase_switch_c(unsigned long long const *pairs,
+                                               Maps const &maps,
+                                               uint32_t base,
+                                               int &gl,
+                                               int &gi0,
+                                               int &gi1) {
+  if (threadIdx.x == 0) {
+    ring_reinit(false);
+    for (int st = 0; st < CSMAX; st++) {
+      mbar_init(cfull(st), 1);
+      mbar_init(cempty(st), 2);
+    }
+    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+  }
+  gl = gi0 = gi1 = 0;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    mbar_expect(rt.misc0, RES::KT_LAT * SF_CHUNK);
+    tma3(&maps.m[RES::ZQ_SF], rt.misc0, base, 0, 0, 0, EVICT_LAST);
+  }
+  int const warp = threadIdx.x >> 5;
+  if (warp >= 2 && warp <= 5) {
+    for (int i = threadIdx.x - 64; i < RES::NPAIR; i += 128) {
+      table_poll<RES>(pairs, i);
+    }
+  }
+  mbar_wait(rt.misc0, 0);
+  fence_after();
+  { // chunk kt line t % 32 word t / 32 -> word t KT_LAT + kt
+    char *const sm = rt_sm();
+    for (int i = threadIdx.x; i < T * RES::KT_LAT; i += 256) {
+      int const t = i / RES::KT_LAT, kt = i - t * RES::KT_LAT;
+      *reinterpret_cast<uint32_t *>(sm + CSmem<RES>::OFF_ZSF + 4 * i) =
+          *reinterpret_cast<uint32_t const *>(sm + kt * SF_CHUNK +
+                                              16 * (t % 32) + 4 * (t / 32));
+    }
+  }
+  // every thread's reads of the staged chunks before the ring's TMA writes
+  // there (generic -> async proxy)
+  asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+  __syncthreads();
+}
+
+// run_dynamic's roles and queue on the compact ring (the vslots of
+// split_slots): warp 0 lane 0 takes the entries and arms the even stages, warp
+// 7 lane 0 the odd ones, warps 1 and 6 issue, warps 2..5 drain
+template <class RES, class CM>
+__device__ __forceinline__ void run_dynamic_c(G const &g,
+                                              Maps const &maps,
+                                              float *racc,
+                                              uint32_t base,
+                                              uint32_t tb,
+                                              int &wt) {
+  constexpr int MT13 = RES::MT13, OT2 = RES::OT2, K = RES::K, LAT = RES::LAT,
+                IRP = RES::IRP, KT2 = RES::KT2;
+  int *const ntok_s = RES::ntok(), *const tok_s = RES::tok(),
+             *const start_s = RES::start();
+  float *const w_s = RES::wt();
+  unsigned char *const kk_s = RES::kk();
+  int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  int const n_live = s_ints[1], n13 = n_live * MT13, n2 = n_live * OT2;
+  int const n4 = ((n2 * 4 / 5) / OT2) * OT2,
+            t1 = (n2 - n4 < NSM) ? n2 - n4 : NSM, off1 = n2 - t1,
+            n2e = (off1 + 1) / 2;
+  int const nentries = n13 + n2e + t1;
+  float *acc_s =
+      reinterpret_cast<float *>(rt_sm() + CSmem<RES>::OFF_CACC);
+  auto entry_of = [&](int idx, QueueEntry &e) {
+    if (idx < n13) {
+      e.kind = QE_W13;
+      e.a = idx / MT13;
+      e.b = idx % MT13;
+    } else if (idx < n13 + n2e) {
+      int const i0 = 2 * (idx - n13);
+      e.kind = QE_W2;
+      e.a = i0;
+      e.b = (off1 - i0 < 2) ? off1 - i0 : 2;
+    } else if (idx < nentries) {
+      e.kind = QE_W2;
+      e.a = off1 + (idx - n13 - n2e);
+      e.b = 1;
+    } else {
+      e.kind = QE_END;
+      e.a = e.b = 0;
+    }
+  };
+  if (warp == 0) {
+    if (lane == 0) {
+      int qn = 0, chk = -1, gl = 0;
+      bool maps_pf = false;
+      auto publish = [&](QueueEntry const &e, int qn_) {
+        int const qpos = qn_ % W2QD;
+        if (qn_ >= W2QD) {
+          mbar_wait(rt.qempty0 + 8 * qpos, ((qn_ / W2QD) - 1) & 1);
+        }
+        if (e.kind == QE_W2 && !maps_pf) {
+          prefetch_tmap(&maps.m[RES::W2X2]);
+          prefetch_tmap(&maps.m[RES::W2]);
+          prefetch_tmap(&maps.m[RES::W2SFX2]);
+          prefetch_tmap(&maps.m[RES::W2SF]);
+          prefetch_tmap(&maps.m[CM::HQC_KT]);
+          prefetch_tmap(&maps.m[CM::HQC_A8]);
+          prefetch_tmap(&maps.m[RES::HQ_SF2]);
+          prefetch_tmap(&maps.m[RES::HQ_SF]);
+          maps_pf = true;
+        }
+        w2q[qpos][0] = e.kind;
+        w2q[qpos][1] = e.a;
+        w2q[qpos][2] = e.b;
+        asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+        mbar_arrive(rt.qfull0 + 8 * qpos);
+        if (qn_ >= W2QD) {
+          mbar_wait(rt.qempty7_0 + 8 * qpos, ((qn_ / W2QD) - 1) & 1);
+        }
+        w2q7[qpos][0] = e.kind;
+        w2q7[qpos][1] = e.a;
+        w2q7[qpos][2] = e.b;
+        mbar_arrive(rt.qfull7_0 + 8 * qpos);
+      };
+      prefetch_tmap(&maps.m[CM::ZQG]);
+      QueueEntry e;
+      entry_of(s_ints[2], e);
+      publish(e, qn);
+      while (e.kind != QE_END) {
+        QueueEntry en;
+        if (e.kind == QE_W2) {
+          int const idx1 = (int)atom_inc_lane0(g.cnt + RES::W2NEXT);
+          int const v = e.a / OT2, ot0 = e.a - v * OT2;
+          for (int i = 0; i < e.b; i++) {
+            load_w2c<RES, CM>(maps, g, base, gl, 0, v, ot0 + i, chk);
+          }
+          entry_of(idx1, en);
+          publish(en, qn + 1);
+        } else {
+          load_w13c<RES, CM>(maps, base, gl, 0, e.a, e.b, 0, W13_TAKE_AT);
+          int const idx1 = (int)atom_inc_lane0(g.cnt + RES::W2NEXT);
+          load_w13c<RES, CM>(maps, base, gl, 0, e.a, e.b, W13_TAKE_AT, 1 << 20);
+          entry_of(idx1, en);
+          publish(en, qn + 1);
+        }
+        e = en;
+        qn++;
+      }
+    }
+  } else if (warp == 1 || warp == 6) { // the issuers
+    int const iss = warp_same<true>((warp == 1) ? 0 : 1);
+    int gi = 0;
+    uint32_t const tbu = (uint32_t)warp_same<true>((int)tb),
+                   baseu = (uint32_t)warp_same<true>((int)base);
+    int wtt0 = warp_same<true>(wt);
+    for (int qn = 0;; qn++) {
+      int const qpos = qn % W2QD;
+      mbar_wait(rt.qfull0 + 8 * qpos, (qn / W2QD) & 1);
+      QueueEntry const e{warp_same<true>(w2q[qpos][0]),
+                         warp_same<true>(w2q[qpos][1]),
+                         warp_same<true>(w2q[qpos][2])};
+      if (e.kind == QE_END) {
+        break;
+      }
+      int const ntile = (e.kind == QE_W2) ? e.b : 1;
+      for (int i = 0; i < ntile; i++) {
+        int const wtt = wtt0 + i, a = acc_slot(wtt);
+        if (wtt >= ACC_STAGES) {
+          mbar_wait(rt.acc_empty0 + 8 * a, (acc_round(wtt) - 1) & 1);
+        }
+        if (e.kind == QE_W2) {
+          issue_c<RES, false>(baseu, tbu, iss, gi, a, (e.a + i) / OT2);
+        } else {
+          issue_c<RES, true>(baseu, tbu, iss, gi, a, e.a);
+        }
+      }
+      wtt0 += ntile;
+    }
+  } else if (warp == 7) { // second loader: the odd stages
+    int chk7 = -1, gl = 0;
+    for (int qn = 0;; qn++) {
+      int const qpos = qn % W2QD;
+      mbar_wait(rt.qfull7_0 + 8 * qpos, (qn / W2QD) & 1);
+      QueueEntry const e{w2q7[qpos][0], w2q7[qpos][1], w2q7[qpos][2]};
+      __syncwarp();
+      if (lane == 0) {
+        mbar_arrive(rt.qempty7_0 + 8 * qpos);
+      }
+      if (e.kind == QE_END) {
+        break;
+      }
+      if (e.kind == QE_W2) {
+        int const v = e.a / OT2, ot0 = e.a - v * OT2;
+        for (int i = 0; i < e.b; i++) {
+          if (lane == 0) {
+            load_w2c<RES, CM>(maps, g, base, gl, 1, v, ot0 + i, chk7);
+          } else {
+            gl += RES::NST2;
+          }
+        }
+        __syncwarp();
+      } else {
+        if (lane == 0) {
+          load_w13c<RES, CM>(maps, base, gl, 1, e.a, e.b, 0, 1 << 20);
+        } else {
+          gl += RES::KT_LAT / 2;
+        }
+      }
+    }
+  } else if (warp >= 2 && warp <= 5) { // the epilogue, 128 threads
+    float const lim = __int_as_float(RES::LIMIT_BITS);
+    int wtt0 = wt;
+    for (int qn = 0;; qn++) {
+      int const qpos = qn % W2QD;
+      mbar_wait(rt.qfull0 + 8 * qpos, (qn / W2QD) & 1);
+      QueueEntry const e{w2q[qpos][0], w2q[qpos][1], w2q[qpos][2]};
+      if (e.kind == QE_END) {
+        break;
+      }
+      if (e.kind == QE_W2) { // R[(t, k)][128 ot + row] = weight x result
+        for (int item = 0; item < e.b; item++) {
+          int const wtt = wtt0 + item, w = e.a + item, v = w / OT2,
+                    ot = w - v * OT2, nt = ntok_s[v];
+          float val[NC];
+          int const row = drain_c(tb, acc_slot(wtt), acc_round(wtt) & 1, val);
+          for (int i = 0; i < nt; i++) {
+            int const e_ = start_s[v] + i; // the vslot's i-th entry
+            float vi = val[0]; // val[i] by an unrolled select
+#pragma unroll
+            for (int k = 1; k < NC; k++) {
+              vi = (i == k) ? val[k] : vi;
+            }
+            racc[((size_t)tok_s[e_] * K + kk_s[e_]) * LAT + ot * 128 + row] =
+                w_s[e_] * vi;
+          }
+        }
+        wtt0 += e.b;
+      } else { // W13: rows 0..63 gate, 64..127 up of features [64 m, 64 m + 64)
+        int const v = e.a, mt = e.b, N = (ntok_s[v] + 7) & ~7;
+        float val[NC];
+        int const row = drain_c(tb, acc_slot(wtt0), acc_round(wtt0) & 1, val);
+#pragma unroll
+        for (int c = 0; c < NC; c++) {
+          acc_s[row * NC + c] = val[c];
+        }
+        asm volatile("bar.sync 1, 128;" ::: "memory");
+        if (row < 64) { // a warp's 32 lanes: one 32-feature group of h
+          int const f = mt * 64 + row, kt2 = f >> 7, kb = (f >> 5) & 3;
+#pragma unroll 1
+          for (int c0 = 0; c0 < N; c0 += 8) { // 8 places at a time
+            float h[8], am[8];
+#pragma unroll
+            for (int t = 0; t < 8; t++) {
+              float const gt = fminf(bf16r(acc_s[row * NC + c0 + t]), lim);
+              float const up = fminf(
+                  fmaxf(bf16r(acc_s[(64 + row) * NC + c0 + t]), -lim), lim);
+              h[t] = bf16r(gt / (1.0f + expf(-gt)) * up);
+              am[t] = fabsf(h[t]);
+            }
+#pragma unroll
+            for (int d = 16; d > 0; d >>= 1)
+#pragma unroll
+              for (int t = 0; t < 8; t++) {
+                am[t] = fmaxf(am[t], __shfl_xor_sync(0xffffffffu, am[t], d));
+              }
+#pragma unroll
+            for (int t = 0; t < 8; t++) {
+              int const ex = xq_exponent(am[t]), cc = c0 + t;
+              buf_at<uint8_t>(g, RES::HQ)[((size_t)v * NC + cc) * IRP + f] =
+                  cvt_e4m3_nv(h[t] *
+                              __uint_as_float((uint32_t)(127 - ex) << 23));
+              if (lane == 0) { // line cc of the chunk, word 0: byte 16 cc + kb
+                buf_at<uint8_t>(
+                    g, RES::HSF)[((size_t)v * KT2 + kt2) * SF_CHUNK + cc * 16 +
+                                 kb] = (uint8_t)(ex + 127);
+              }
+            }
+          }
+        }
+        // the bar.sync orders every thread's h_q / scale stores before thread
+        // 64's red.release.gpu (as moe_experts.cuh)
+        asm volatile("bar.sync 1, 128;" ::: "memory");
+        if (threadIdx.x == 64) {
+          cnt_add(g.cnt + RES::CHQ + v, 1); // the W2 loaders acquire MT13
+        }
+        wtt0++;
+      }
+      mbar_arrive(rt.qempty0 + 8 * qpos); // 128 arrivals: entry retired
+    }
+  }
+}
+} // namespace cmp
+#endif // MOE_CMP
+
 } // namespace swiglu_moe
 
 // the node's Slots: its buffer slots (h_q, its scales), its map slots (w13,
@@ -667,15 +1372,31 @@ __device__ __forceinline__ void run_swiglu_moe_experts(Maps const &maps,
   if (threadIdx.x == 0) {
     g.stamps[sm_id * NSTAMP + STAMP_TASK0] = gtime();
   }
+#ifdef MOE_CMP
+  constexpr bool CMP = swiglu_moe::cmp::ON;
+#endif
   if (!L.ring_relaid) {
-    swiglu_moe::phase_switch<RES>(
-        buf_at<unsigned long long const>(g, PAIRS::buf),
-        maps,
-        L.base,
-        L.tb,
-        L.gl,
-        L.gi0,
-        L.gi1);
+#ifdef MOE_CMP
+    if constexpr (CMP) {
+      swiglu_moe::cmp::phase_switch_c<RES>(
+          buf_at<unsigned long long const>(g, PAIRS::buf),
+          maps,
+          L.base,
+          L.gl,
+          L.gi0,
+          L.gi1);
+    } else
+#endif
+    {
+      swiglu_moe::phase_switch<RES>(
+          buf_at<unsigned long long const>(g, PAIRS::buf),
+          maps,
+          L.base,
+          L.tb,
+          L.gl,
+          L.gi0,
+          L.gi1);
+    }
     L.ring_relaid = true;
   }
 #if defined(STATIC_TIMING_BUILD) && defined(MOE_FRONT_STAMPS)
@@ -695,19 +1416,32 @@ __device__ __forceinline__ void run_swiglu_moe_experts(Maps const &maps,
 #else
 #define MOE_RD_STAMPS L.stage_stamps
 #endif
+#ifdef MOE_CMP
+  if constexpr (CMP) {
+    swiglu_moe::cmp::split_slots<RES>();
+  }
+#endif
   if (threadIdx.x == 0) {
     s_ints[2] = (int)pre_idx;
   }
   __syncthreads();
-  swiglu_moe::run_dynamic<RES>(g,
-                               maps,
-                               buf_at<float>(g, SELF::buf),
-                               L.base,
-                               L.tb,
-                               L.gl,
-                               L.gi0,
-                               L.gi1,
-                               L.wt STAGE_STAMP_ARG(MOE_RD_STAMPS));
+#ifdef MOE_CMP
+  if constexpr (CMP) {
+    swiglu_moe::cmp::run_dynamic_c<RES, swiglu_moe::cmp::CMaps<MAP_SLOTS>>(
+        g, maps, buf_at<float>(g, SELF::buf), L.base, L.tb, L.wt);
+  } else
+#endif
+  {
+    swiglu_moe::run_dynamic<RES>(g,
+                                 maps,
+                                 buf_at<float>(g, SELF::buf),
+                                 L.base,
+                                 L.tb,
+                                 L.gl,
+                                 L.gi0,
+                                 L.gi1,
+                                 L.wt STAGE_STAMP_ARG(MOE_RD_STAMPS));
+  }
 #undef MOE_RD_STAMPS
   if (threadIdx.x == 0) {
     g.stamps[sm_id * NSTAMP + STAMP_TASK1] = gtime();
@@ -727,8 +1461,15 @@ template <class SELF,
           class PAIRS,
           class... REST>
 constexpr int smem_swiglu_moe_experts() {
-  return swiglu_moe::Smem<
-      SwigluSlotsOf<SELF, PARAMS, BUF_SLOTS, MAP_SLOTS, XQ, PAIRS>>::BYTES;
+  using RES = SwigluSlotsOf<SELF, PARAMS, BUF_SLOTS, MAP_SLOTS, XQ, PAIRS>;
+#ifdef MOE_CMP
+  if constexpr (swiglu_moe::cmp::ON) {
+    return swiglu_moe::Smem<RES>::BYTES > swiglu_moe::cmp::CSmem<RES>::BYTES
+               ? swiglu_moe::Smem<RES>::BYTES
+               : swiglu_moe::cmp::CSmem<RES>::BYTES;
+  }
+#endif
+  return swiglu_moe::Smem<RES>::BYTES;
 }
 
 } // namespace static_mk

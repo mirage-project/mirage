@@ -308,6 +308,11 @@ def build(ws: list, out: str, profile: bool = False, extra_flags: list = None, p
     mpk = StaticMegakernel(num_gpus=gpus, num_sms=sms)
     if T > 8:   # (11-21) the expert node's counter per expert slot (T K of them) and the per-token counters: T = 64 needs
         mpk.max_counter_lines = 32   # more than config.cuh's default 16 (the generated layer defines STATIC_NODE_COUNTER_LINES)
+    # (11-23, default off) -DMOE_CMP=16: the experts over their own tokens (16-token virtual slots) at T >= 32 (-DMOE_CMP_MIN_T=16:
+    # T = 16 too, measured slower there)
+    global MOE_COMPACT
+    mt = [int(f.split("=")[1]) for f in (extra_flags or []) if f.startswith("-DMOE_CMP_MIN_T=")]
+    mpk.moe_compact = MOE_COMPACT = 16 if T >= max(16, mt[-1] if mt else 32) and "-DMOE_CMP=16" in (extra_flags or []) else 0
     mpk.moe_rows_poll = "-DMOE_ROWS_POLL" in (extra_flags or [])   # (C12, 11-18: sum_store polls the routed rows; default off)
     build_graph(mpk, w, valid_rows=valid_rows)
     if x_flag:   # H1 stage A: x's flag and the deferred wait (x_flag_modes)
@@ -388,6 +393,9 @@ def relrms(a: torch.Tensor, b: torch.Tensor) -> float:
     return ((a - b).norm() / b.norm()).item()
 
 
+MOE_COMPACT = 0   # (11-23) build(): NC when the experts are built with -DMOE_CMP=NC (partial_reference's h_q layout)
+
+
 def partial_reference(bufs: dict, w: dict, I: int) -> torch.Tensor:
     """This GPU's partial of y in fp64 from its own h_q and hs_q (what sum_store adds, without its fp32 roundings): per token
     its K routed rows (dequantized h_q x the packed w2 of the expert) and shared down (hs_q x its w2 columns) [T, HID]."""
@@ -396,13 +404,20 @@ def partial_reference(bufs: dict, w: dict, I: int) -> torch.Tensor:
     ids, wts = pairs_of(bufs)
     hq_all, hsf_all = bufs[HQ].view(T * K * T, IRP), bufs[HQ_SF].view(T * K, KT2, 32, 16)
     ref = torch.zeros(T, HID, dtype=torch.float64, device=dev)
+    v = 0   # (-DMOE_CMP=NC, MOE_COMPACT: the vslots, an expert's tokens in ascending order NC at a time; h_q row v NC + c)
     for si, e in enumerate(torch.unique(ids).tolist()):   # build_table's slots: the experts used, in ascending id
         W2 = unpack_pieces(w["w2"][e].view(OT2, KT2, 128, 64), w["w2_scales"][e].view(OT2, KT2, 512))
         W2 = W2.transpose(1, 2).reshape(HID, IRP)
-        for t, k in (ids == e).nonzero().tolist():
-            q, sc = hq_all[si * T + t], hsf_all[si, :, t % 32, 4 * (t // 32):4 * (t // 32) + 4].reshape(-1)
+        for j, (t, k) in enumerate((ids == e).nonzero().tolist()):
+            if MOE_COMPACT:
+                vs, c = v + j // MOE_COMPACT, j % MOE_COMPACT
+                q, sc = hq_all[vs * MOE_COMPACT + c], hsf_all[vs, :, c, 0:4].reshape(-1)
+            else:
+                q, sc = hq_all[si * T + t], hsf_all[si, :, t % 32, 4 * (t // 32):4 * (t // 32) + 4].reshape(-1)
             ref[t] += float(wts[t, k]) * (W2 @ (q.view(torch.float8_e4m3fn).double() *
                                                 torch.exp2(sc.double() - 127).repeat_interleave(32)))
+        if MOE_COMPACT:
+            v += -(-int((ids == e).sum()) // MOE_COMPACT)
     q, sc = from_buffer(bufs["hs_q"], KO)
     hs = (q.view(torch.float8_e4m3fn).double() * torch.exp2(sc.double() - 127).repeat_interleave(32, 1)).to(dev)
     return ref + hs @ w8_dequant(w["sd_weight"], w["sd_scales"]).T

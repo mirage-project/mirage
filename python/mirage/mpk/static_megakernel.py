@@ -94,6 +94,8 @@ class StaticMegakernel(PersistentKernel):
         self.tokens = None        # tokens per step: the first dimension of the layers' token-major tensors (_tokens; config.cuh T)
         self.poll_ns = None       # the waits' sleep between polls, ns (runtime.cuh STATIC_*POLL_NS: cnt_wait and the tasks
                                   # that pause with poll_pause; the others keep their own sleeps); None: their defaults
+        self.moe_compact = 0   # (11-23) NC: swiglu_moe_experts is built with -DMOE_CMP=NC (T >= MOE_CMP_MIN_T): its maps 15..17 (x_q rows
+                               # for tile::gather4, h_q in NC-row boxes); 0: off
         self.moe_rows_poll = False   # (C12, 11-18) the layer is built with -DMOE_ROWS_POLL: swiglu_moe_experts' rows 0xFF
                                      # before the launch, polled and re-armed by sum_store (tasks/sum_store.cuh)
         self._static_nodes = {}   # graph index -> what compiler.py needs about a node (_add_node)
@@ -1378,6 +1380,11 @@ class StaticMegakernel(PersistentKernel):
                  self._map("sf", ("b", xq.info["buf"], T * L), (KT_L, KT_L)),
                  self._map("act8kt", ("b", hq, 0), (IRP, NSLOT * T, 2)), self._map("sf", ("b", hsf, 0), (NSLOT * KT2, 1)),
                  self._map("act8", ("b", hq, 0), (IRP, NSLOT * T)), self._map("sf", ("b", hsf, 0), (NSLOT * KT2, 2))]
+        if self.moe_compact:   # (11-23, -DMOE_CMP) maps 15..17: x_q one row a box (tile::gather4), h_q 2 K tiles / 1 K tile x NC
+            NC = self.moe_compact
+            assert T >= 16 and NC <= T, "MOE_CMP: T >= 16"
+            maps += [self._map("act8r", ("t", x_q), (L, T, 1)), self._map("act8ktr", ("b", hq, 0), (IRP, NSLOT * T, 2, NC)),
+                     self._map("act8r", ("b", hq, 0), (IRP, NSLOT * T, NC))]
         tensors = [x_q, pairs, w13, w2, output]
         self._add_node("swiglu_moe_experts", (self._num_sms(), 1, 1), block_dim, tensors, [(-1, -1, -1)] * len(tensors),
                        [I, float_bits(swiglu_limit)], one_task_per_sm=True,
