@@ -92,8 +92,8 @@ def static_instance(mpk: StaticMegakernel, paths, t: dict, out_dir: str, build_d
     """Load one layer of a model: its own copy of the serving build of graph mpk (schedules `paths`) on tensors t, in
     out_dir (a loaded extension holds one layer's state, so each instance has its own directory). The build cache
     (MIRAGE_STATIC_BUILD_CACHE, default <build_dir>/cache) compiles each distinct layer.cu once. For a graph of several
-    GPUs, the instance is GPU `rank` of the graph, and exchange = (multicast address, this GPU's address) of its exchange
-    region."""
+    GPUs, the instance is GPU `rank` of the graph, and exchange = (multicast address, this GPU's address, every GPU's
+    address) of its exchange region."""
     os.environ.setdefault("MIRAGE_STATIC_BUILD_CACHE", os.path.join(build_dir, "cache"))
     return mpk.compile_static(paths, gpu_tensors=[t], out_dir=out_dir, extra_flags=SERVING, device=device,
                               **({"rank": rank, "exchange": exchange} if mpk.num_gpus > 1 else {}))
@@ -111,6 +111,7 @@ class ExchangePool:
         self.buf = _SymmetricMemory.empty_strided_p2p((sum(self.sizes),), [1], torch.uint8, dev, group.group_name)
         self.handle = _SymmetricMemory.rendezvous(self.buf)
         self.mc = int(self.handle.multicast_ptr)
+        self.peers = [int(p) for p in self.handle.buffer_ptrs]   # every rank's copy (STATIC_AR_TWOSHOT's unicast stores)
         if self.mc == 0:
             raise RuntimeError("the TP group's symmetric memory has no multicast address (NVLS). "
                                "MIRAGE_STATIC_ALLREDUCE_IN_KERNEL=0 runs without it")
@@ -118,12 +119,13 @@ class ExchangePool:
         self.taken, self.off = 0, 0
 
     def take(self, nbytes: int) -> tuple:
-        """(the multicast address, this GPU's address) of the next region (of nbytes, at most its listed size)."""
+        """(the multicast address, this GPU's address, every rank's address) of the next region (of nbytes, at most its listed
+        size)."""
         assert self.taken < len(self.sizes) and nbytes <= self.sizes[self.taken], "ExchangePool: regions out of order"
         off = self.off
         self.off += self.sizes[self.taken]
         self.taken += 1
-        return self.mc + off, self.buf.data_ptr() + off
+        return self.mc + off, self.buf.data_ptr() + off, [p + off for p in self.peers]
 
 
 class StaticDecoder:

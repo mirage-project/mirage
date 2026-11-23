@@ -73,13 +73,14 @@ struct PrefetchList {
 #endif
 #endif
 // STATIC_AR_TWOSHOT: the all-reduce of allreduce_send -> hc_post /
-// hc_post_mix (GLM-5.3-Flash's layer tails; and sum_gpus) as a two-shot by
-// token. The generated layer.cu defines it for a graph of T 64 on 4 GPUs
-// with an allreduce_send and without sum_rmsnorm (static_schedule.ar_twoshot,
-// header_code); every other
-// layer has the one-shot (every GPU's partial multicast to every GPU, each GPU
-// adds all slots of every vector). Example (4 GPUs, T 64, H 4096; GPU 2 owns
-// tokens 32..47, AR_TOWN = T / GPUS = 16):
+// hc_post_mix (GLM-5.3-Flash's layer tails), residual_add (LAND: GLM-5.3's
+// layer tails) and sum_gpus as a two-shot by token. The generated layer.cu
+// defines it for a graph of T 64 on 4 GPUs (GLM-5.3-Flash TP4) or 8 GPUs
+// (GLM-5.3 TP8) with an allreduce_send and without sum_rmsnorm
+// (static_schedule.ar_twoshot, header_code); every other layer has the
+// one-shot (every GPU's partial multicast to every GPU, each GPU adds all
+// slots of every vector). Example (4 GPUs, T 64, H 4096; GPU 2 owns tokens
+// 32..47, AR_TOWN = T / GPUS = 16):
 //   allreduce_send on GPU 1, token 37: its bf16 partial row -> ONE store per
 //     16 B into GPU 2's copy (G::peer[2]), slot 1, row 5 of the owner landing
 //     [GPUS][AR_TOWN][H] at the send buffer's offset 0 (ar_twoshot_send)
@@ -90,18 +91,26 @@ struct PrefetchList {
 //     slots re-armed; 2. (every GPU, every token) the vector polled from the
 //     gathered rows (one slot), re-armed (ar_twoshot_get). hc_post task (q, t),
 //     sum_gpus task (q, t): the same, step 1 on GPU t / AR_TOWN
+//   residual_add task x (8 GPUs, T 64, H 6144; GPU 2 owns tokens 16..23,
+//     AR_TOWN 8): first the vectors of tokens 16..23 among its slice
+//     (ar_twoshot_vec order) as step 1 above (the 8 slots added, bf16(sum)
+//     multicast, re-armed), then its whole slice: each vector polled from the
+//     gathered rows, y and h32 as the one-shot's (residual_land_twoshot). The
+//     slices are taken in token-interleaved order (64 columns of every token
+//     in turn), so task x needs only the owners' task x
 // The readers round the sum to bf16 before using it (the one-shot too): R',
-// the mixes and the sums are bit-identical. Task x of a reader waits in step 2
-// only for step 1 of task x on the owner GPUs (compile_plan checks the GPUs'
-// lists together: static_schedule.check_twoshot_deadlock_free). sum_rmsnorm
-// reads only the one-shot layout (no STATIC_AR_TWOSHOT in its graphs).
+// the mixes, y, h32 and the sums are bit-identical. Task x of a reader waits
+// in step 2 only for step 1 of task x on the owner GPUs (compile_plan checks
+// the GPUs' lists together: static_schedule.check_twoshot_deadlock_free).
+// sum_rmsnorm reads only the one-shot layout (no STATIC_AR_TWOSHOT in its
+// graphs).
 #ifdef STATIC_AR_TWOSHOT
 constexpr bool AR_TWOSHOT = true;
 #else
 constexpr bool AR_TWOSHOT = false;
 #endif
-static_assert(!AR_TWOSHOT || (T == 64 && GPUS == 4),
-              "STATIC_AR_TWOSHOT: the layers of T 64 on 4 GPUs "
+static_assert(!AR_TWOSHOT || (T == 64 && (GPUS == 4 || GPUS == 8)),
+              "STATIC_AR_TWOSHOT: the layers of T 64 on 4 or 8 GPUs "
               "(static_schedule.ar_twoshot)");
 
 #ifdef STATIC_NO_START_BARRIER
@@ -227,7 +236,8 @@ __device__ __forceinline__ void push16(G const &g, size_t off, uint4 v) {
 //                          the GPUs), multicast by the owners (every GPU's
 //                          copy: all tokens)
 // both 0xFF-filled (the buffer's fill) and re-armed by their readers
-constexpr int AR_TOWN = T / GPUS; // tokens per owner GPU (16 at T 64, 4 GPUs)
+constexpr int AR_TOWN = T / GPUS; // tokens per owner GPU (16 at T 64, 4 GPUs;
+                                  // 8 at 8 GPUs)
 template <int W>
 __host__ __device__ constexpr size_t ar_rank() {
   return (size_t)AR_TOWN * W * 2;
@@ -269,6 +279,28 @@ __device__ __forceinline__ void
                    OFF + (size_t)g.rank * ar_rank<W>() +
                        ((size_t)j * (W / 8) + c) * 16,
                    v);
+}
+// the order residual_add's tasks take the T x W / 8 vectors in (vector index i
+// -> token t, vector c of the row): 8 vectors (64 columns) of each token in
+// turn, so a slice of 8 GPUS x AR_TOWN consecutive indices or more holds
+// vectors of every owner's tokens. Owner of i: (i / (8 AR_TOWN)) % GPUS
+template <int W>
+__device__ __forceinline__ void ar_twoshot_vec(int i, int &t, int &c) {
+  static_assert(W % 64 == 0, "STATIC_AR_TWOSHOT: whole 64-column groups");
+  int const q = i >> 3; // (64-column group) * T + token
+  t = q % T;
+  c = (q / T) * 8 + (i & 7);
+}
+// the indices i of [0, n) whose token this GPU owns, counted
+__device__ __forceinline__ int ar_twoshot_owned_below(int n, int rank) {
+  constexpr int B = 8 * AR_TOWN; // a run of one owner's indices
+  int const r = n % (B * GPUS) - rank * B;
+  return n / (B * GPUS) * B + (r < 0 ? 0 : r > B ? B : r);
+}
+// the j-th index this GPU owns
+__device__ __forceinline__ int ar_twoshot_owned_at(int j, int rank) {
+  constexpr int B = 8 * AR_TOWN;
+  return j / B * (B * GPUS) + rank * B + j % B;
 }
 #else
 // declared only: the calls are in discarded `if constexpr (AR_TWOSHOT)`

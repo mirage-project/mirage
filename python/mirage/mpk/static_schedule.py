@@ -84,7 +84,7 @@ def check_deadlock_free(all_tasks: List[dict], queues: List[List[int]], groups: 
 def check_twoshot_deadlock_free(gpus: List[tuple], kinds: Dict[int, str]) -> None:
     """Raise unless the GPUs' lists together can run with the cross-GPU waits of STATIC_AR_TWOSHOT (core.cuh).
     gpus: per GPU (all_tasks, queues, groups) as check_deadlock_free takes them. kinds: graph_idx -> "send" (allreduce_send)
-    or "twoshot" (an hc_post, hc_post_mix or sum_gpus reading an allreduce_send node's output).
+    or "twoshot" (an hc_post, hc_post_mix, residual_add or sum_gpus reading an allreduce_send node's output).
     The waits, per GPU g, task t (the same task on GPU o: the task of the same node and grid position there):
       - t waits for its deps and for the task before it on its SM (as check_deadlock_free); a dep of an allreduce_send
         node: also for that send task on every GPU (the sums of every GPU land on g)
@@ -205,11 +205,12 @@ def config_checks(used: List[str], tokens: int = 8, max_bufs: Optional[int] = No
 
 
 def ar_twoshot(node_names, tokens: int, num_gpus: int) -> bool:
-    """The all-reduce of allreduce_send -> hc_post / hc_post_mix / sum_gpus as a two-shot by token (core.cuh
-    STATIC_AR_TWOSHOT, defined by header_code): a graph of T 64 on 4 GPUs (GLM-5.3-Flash's TP4 layers at bs 64) with an
-    allreduce_send and without sum_rmsnorm (it reads only the one-shot layout, e.g. Kimi K3's MoE)."""
+    """The all-reduce of allreduce_send -> hc_post / hc_post_mix / residual_add / sum_gpus as a two-shot by token (core.cuh
+    STATIC_AR_TWOSHOT, defined by header_code): a graph of T 64 on 4 GPUs (GLM-5.3-Flash's TP4 layers at bs 64) or on 8
+    GPUs (GLM-5.3's TP8 layers at bs 64) with an allreduce_send and without sum_rmsnorm (it reads only the one-shot
+    layout, e.g. Kimi K3's MoE)."""
     names = set(node_names)
-    return tokens == 64 and num_gpus == 4 and "allreduce_send" in names and "sum_rmsnorm" not in names
+    return tokens == 64 and num_gpus in (4, 8) and "allreduce_send" in names and "sum_rmsnorm" not in names
 
 
 def reset_sms(schedule: dict) -> List[int]:
