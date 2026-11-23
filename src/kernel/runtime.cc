@@ -327,6 +327,11 @@ void register_mugraph(
         for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
           for (int subtask_id = 0; subtask_id < num_subtasks; subtask_id++) {
             FullTaskDesc task(task_type, variant_id);
+            if (task_type == TASK_SERVING_SAMPLING) {
+              task.task_metadata.request_id = bid.x;
+              // task_offset aliases request_id in TaskMetadata's union.
+              task.task_metadata.merge_task_offset = bid.y;
+            }
             // Set request_id for attention and paged_attention
             if ((task_type == TASK_ATTENTION_1) ||
                 (task_type == TASK_ATTENTION_2) ||
@@ -1800,6 +1805,7 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_ATTN_SM100] = "TASK_ATTN_SM100";
   task_type_to_name[TASK_ARGMAX_PARTIAL_SM100] = "TASK_ARGMAX_PARTIAL_SM100";
   task_type_to_name[TASK_ARGMAX_REDUCE_SM100] = "TASK_ARGMAX_REDUCE_SM100";
+  task_type_to_name[TASK_SERVING_SAMPLING] = "TASK_SERVING_SAMPLING";
   task_type_to_name[TASK_SAMPLING_SM100] = "TASK_SAMPLING_SM100";
   task_type_to_name[TASK_SAMPLING_PARTIAL_SM100] =
       "TASK_SAMPLING_PARTIAL_SM100";

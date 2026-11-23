@@ -1,0 +1,175 @@
+"""Synthetic logits through the production online_pinned serving sampling task."""
+
+from collections import Counter
+from types import SimpleNamespace
+import shutil
+
+import mirage
+import numpy as np
+import pytest
+import torch
+
+from mirage.engine.model_runner import ModelRunner
+from mirage.engine.sampling import SamplingParams
+from mirage.mpk.online_pinned_runtime import OnlinePinnedRuntime
+from mirage.mpk.persistent_kernel import PersistentKernel
+
+
+REAL_VOCAB = 32761
+TOKEN_IDS = [0, 8193, 17001, 32760]
+LOGITS = np.full(REAL_VOCAB, -30, dtype=np.float32)
+LOGITS[TOKEN_IDS] = [-1, -1.4, -1.8, -2.2]
+
+
+@pytest.fixture(scope="module", params=[(32768, None), (153600, None), (153600, 2)],
+                ids=["32k-vocab-multi-cta", "large-vocab-multi-cta", "more-partitions-than-workers"])
+def sample(request, tmp_path_factory):
+    if not torch.cuda.is_available() or not shutil.which("nvcc"):
+        pytest.skip("CUDA and nvcc are required")
+
+    workdir = pytest.MonkeyPatch()
+    workdir.chdir(tmp_path_factory.mktemp("serving_sampling"))
+    request.addfinalizer(workdir.undo)
+
+    device = torch.cuda.current_device()
+    workers, schedulers = mirage.get_configurations_from_gpu(device)
+    padded_vocab, worker_limit = request.param
+    if worker_limit is not None:
+        workers, schedulers = worker_limit, 4
+    capacity = 32
+    config = SimpleNamespace(max_num_batched_requests=capacity,
+                             max_num_batched_tokens=capacity,
+                             max_seq_length=16, max_num_pages=capacity,
+                             pinned_ring_capacity=64)
+    meta = ModelRunner._allocate_meta_tensors(config)
+    params = PersistentKernel.get_default_init_parameters()
+    params.update(mode="online_pinned", test_mode=True, num_workers=workers,
+                  num_local_schedulers=schedulers,
+                  max_num_batched_requests=capacity,
+                  max_num_batched_tokens=capacity,
+                  max_seq_length=config.max_seq_length,
+                  max_num_pages=config.max_num_pages, page_size=16,
+                  pinned_ring_capacity=config.pinned_ring_capacity,
+                  meta_tensors=meta)
+    pk = PersistentKernel(**params)
+    logits = torch.zeros(capacity, padded_vocab, dtype=torch.bfloat16, device=device)
+    logits[:, :len(LOGITS)] = torch.tensor(LOGITS, dtype=torch.bfloat16, device=device)
+    output = meta["output_tokens"]
+    pk.serving_sampling_layer(pk.attach_input(logits, name="logits"),
+                              pk.attach_input(output, name="output"))
+    pk.compile()
+
+    adapter = SimpleNamespace(metadata=SimpleNamespace(mode="online_pinned"),
+                              pinned_ring_capacity=config.pinned_ring_capacity,
+                              total_num_requests=capacity, persistent_kernel=pk,
+                              **meta)
+    runtime = OnlinePinnedRuntime(adapter)
+    runtime.reset()
+    runtime.start()
+    pk()
+    next_rid = 0
+
+    def draw(settings, seeds=range(512), history=(), prompt_len=0, max_new_tokens=1):
+        nonlocal next_rid
+        # The online path requires a nonempty prompt.
+        prompt = list(history[:prompt_len]) or [REAL_VOCAB - 1]
+        seeds = list(seeds)
+        result = []
+        for begin in range(0, len(seeds), capacity):
+            requests = []
+            for seed in seeds[begin:begin + capacity]:
+                rid = next_rid
+                next_rid += 1
+                sampling = SamplingParams(**settings, seed=seed,
+                                          max_new_tokens=max_new_tokens)
+                payload = sampling.pack(len(prompt), config.max_seq_length, REAL_VOCAB, [])
+                runtime.submit(rid, torch.tensor(prompt, dtype=torch.int64),
+                               generation_config=payload)
+                requests.append(rid)
+            for rid in requests:
+                row, step = runtime.wait_for_request(rid, timeout=60)
+                assert runtime.finish_reason(row) == "length"
+                result.append(int(runtime.read_tokens_at_row(row, step)[-1]))
+                assert runtime.release_request(rid)
+        return result
+
+    try:
+        yield draw
+    finally:
+        runtime.request_shutdown()
+        pk.wait()
+        runtime.stop()
+        pk.finalize()
+
+
+@pytest.mark.parametrize("settings", [
+    {"temperature": 0},
+    {"temperature": 1e-100},
+    {"temperature": 1e-100, "top_k": 3},
+    {"temperature": 1e-100, "top_p": .95},
+    {"temperature": 1e-100, "top_k": 3, "top_p": .95},
+    {"temperature": 0, "top_k": 3, "top_p": 1e-100,
+     "logit_bias": {TOKEN_IDS[1]: .3984375}},
+])
+def test_greedy(sample, settings):
+    assert sample(settings, range(8)) == [0] * 8
+
+
+def test_topk_one_and_seed(sample):
+    assert sample({"temperature": 1, "top_k": 1}, range(8)) == [0] * 8
+    assert sample({"temperature": 1}, [17]) == sample({"temperature": 1}, [17])
+
+
+@pytest.mark.parametrize("settings", [
+    {"temperature": 1},
+    {"temperature": .5},
+    {"temperature": 1, "top_k": 3},
+    {"temperature": 1, "top_p": .75},
+    {"temperature": 1, "top_k": 3, "top_p": .75},
+    {"temperature": 1, "top_k": 2, "top_p": .5},
+    {"temperature": .8, "top_k": 3, "top_p": .9,
+     "logit_bias": {TOKEN_IDS[1]: 2.}},
+])
+def test_sampling_distribution(sample, settings):
+    scores = torch.tensor(LOGITS[:REAL_VOCAB], dtype=torch.bfloat16).float()
+    for token, bias in settings.get("logit_bias", {}).items():
+        scores[token] += bias
+    scores /= settings["temperature"]
+    probabilities = torch.softmax(scores, 0)
+    keep = torch.ones(REAL_VOCAB, dtype=torch.bool)
+    if settings.get("top_k", 0):
+        boundary = probabilities.topk(settings["top_k"]).values[-1]
+        keep &= probabilities >= boundary
+    if settings.get("top_p", 1) < 1:
+        ordered = probabilities.sort(descending=True).values
+        boundary = ordered[(ordered.cumsum(0) >= settings["top_p"]).nonzero()[0, 0]]
+        keep &= probabilities >= boundary
+    expected = probabilities.masked_fill(~keep, 0)
+    expected /= expected.sum()
+
+    draws = sample(settings)
+    counts = Counter(draws)
+    assert set(counts) <= set(range(REAL_VOCAB))
+    for token, probability in enumerate(expected.tolist()):
+        actual = counts[token] / len(draws)
+        tolerance = 5 * (probability * (1 - probability) / len(draws)) ** .5 + .01
+        assert abs(actual - probability) < tolerance, (settings, token, actual, probability)
+
+
+def test_prompt_penalties(sample):
+    assert sample({"temperature": 0, "repetition_penalty": 2}, [1], [0], 1) == [TOKEN_IDS[1]]
+    assert sample({"temperature": 0, "frequency_penalty": 2,
+                   "presence_penalty": 2}, [1], [0], 1) == [0]
+    assert sample({"temperature": 0, "frequency_penalty": 2}, [1], [0], 1,
+                  max_new_tokens=2) == [TOKEN_IDS[1]]
+    assert sample({"temperature": 0, "repetition_penalty": 2,
+                   "logit_bias": {TOKEN_IDS[1]: 3}}, [1], [0], 1) == [TOKEN_IDS[1]]
+
+
+@pytest.mark.parametrize("top_k", [0, 3])
+def test_extreme_top_p_and_seed_reproducibility(sample, top_k):
+    assert sample({"temperature": .8, "top_k": top_k, "top_p": 1e-100},
+                  range(8)) == [0] * 8
+    settings = {"temperature": .8, "top_k": 3, "top_p": .9}
+    seeds = range(64)
+    assert sample(settings, seeds) == sample(settings, seeds)

@@ -8,6 +8,7 @@ import sysconfig
 import json
 
 from ..core import *
+from ..core import serving_scratch_words, serving_sampling_buffer_bytes
 from ..kernel import get_key_paths, KNGraph, TBGraph
 from .speculative import (
     SpecDecodeConfig,
@@ -1404,6 +1405,10 @@ class PersistentKernel:
                 f"q_len_override={q_len_override} exceeds "
                 f"max_tokens_per_request={self.max_tokens_per_request}")
             params.append(self.max_tokens_per_request)
+        elif self.target_cc < 90:
+            params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed,
+                      self.max_seq_length, block_size, q_len_override,
+                      tail_offset, group_id, stride_field]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         assert grid_dim[0] == self.max_num_batched_requests
@@ -2660,6 +2665,62 @@ class PersistentKernel:
                 tb_graph, "argmax_reduce", [self.argmax_partial_output_size]
             )
 
+    def serving_sampling_layer(self, logits: DTensor, output: DTensor,
+                               num_ctas: int = None):
+        """Sample each request with partitioned vocabulary tasks."""
+        if self.mode != "online_pinned":
+            raise ValueError("serving_sampling_layer requires online_pinned mode")
+        vocab_size = logits.dim(1)
+        max_ctas = 32
+        if num_ctas is None:
+            num_ctas = max_ctas
+        if not 2 <= num_ctas <= max_ctas:
+            raise ValueError(f"sampling num_ctas must be between 2 and {max_ctas}")
+        scratch = self.new_tensor(
+            (self.max_num_batched_requests, serving_scratch_words(vocab_size)),
+            dtype=float32,
+            name="serving_sampling_scratch",
+        )
+        parallel = self.new_tensor(
+            (self.max_num_batched_requests,
+             serving_sampling_buffer_bytes(vocab_size) // 4),
+            dtype=float32,
+            name="serving_sampling_parallel_scratch",
+        )
+        previous = None
+        radix_ctas = min(num_ctas, self.num_workers)
+        radix_groups = self.num_workers // radix_ctas
+        # Prepare, score, and fused dual-pivot sampling.
+        # Sampling groups occupy distinct workers and stride over request slots.
+        prepare, score, sample = range(3)
+        for phase in (prepare, score, sample):
+            final = phase == sample
+            result = output if final else self.new_tensor(
+                (self.max_num_batched_requests, 1),
+                dtype=int32,
+                name=f"serving_sampling_phase_{phase}",
+            )
+            grid = (self.max_num_batched_requests,
+                    1 if phase == prepare else num_ctas, 1)
+            if final:
+                grid = (radix_groups, radix_ctas, 1)
+            graph = TBGraph(CyTBGraph(grid, (128, 1, 1), 1, 64))
+            inputs = [logits, scratch, parallel]
+            for tensor in inputs:
+                graph.new_input(tensor, (-1, -1, -1), -1, True)
+            if previous is not None:
+                inputs.append(previous)
+                previous_map = (-1, -1, -1) if final else (0, -1, -1)
+                graph.new_input(previous, previous_map, -1, True)
+            output_map = (-1, -1, -1) if final else (0, -1, -1)
+            graph.new_input(result, output_map, -1, True)
+            self.kn_graph.customized(inputs + [result], graph)
+            self.kn_graph.register_task(
+                graph, "serving_sampling",
+                [phase, radix_ctas if final else num_ctas, radix_groups]
+            )
+            previous = result
+
     def sampling_sm100_layer(
         self,
         logits: DTensor,      # [batch_size, vocab_size]
@@ -3410,6 +3471,9 @@ class PersistentKernel:
             "pinned_step",
             "pinned_inbox_tokens",
             "pinned_rid_at_row",
+            "pinned_generation_config",
+            "generation_config",
+            "pinned_finish_reason",
         ]
         meta_tensors_ptr = []
         for key in expected_order:
@@ -3540,6 +3604,9 @@ class PersistentKernel:
             meta_tensors.append(self.meta_tensors["pinned_step"])
             meta_tensors.append(self.meta_tensors["pinned_inbox_tokens"])
             meta_tensors.append(self.meta_tensors["pinned_rid_at_row"])
+            meta_tensors.append(self.meta_tensors["pinned_generation_config"])
+            meta_tensors.append(self.meta_tensors["generation_config"])
+            meta_tensors.append(self.meta_tensors["pinned_finish_reason"])
         if "kv_event_log" in self.meta_tensors:
             meta_tensors.append(self.meta_tensors["kv_event_log"])
         meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors]
