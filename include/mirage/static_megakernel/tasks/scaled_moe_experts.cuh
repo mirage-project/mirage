@@ -98,6 +98,28 @@ __device__ __forceinline__ int hq_swz(int f, int r) {
   return (((f >> 4) ^ (r & 7)) << 4) | (f & 15);
 }
 
+// W2UE (with Slots::W2C and the layer's option 4,
+// scaled_moe_experts_layer(w2_ue8m0=True): Slots::W2UE): the W2 weights'
+// scales are powers of two (the host requantized them as SGLang does for
+// DeepGEMM on Blackwell: fp8_fp32scale_weights.requant_ue8m0) and so are h_q's
+// (hq_out: group_scale<true>, the power of two at or above amax / 448), so the
+// block-scaled MMA (kind::mxf8f6f4, UE8M0 scales) applies both: per W2 tile
+// and K tile kt, issuer 0 writes a scale chunk whose row c (the slot's place
+// c, the MMA's column) holds the UE8M0 byte eh(tok[c], kt) + ew(ot, kt) - 127
+// (both exponents from the entry's scale buffer, w2_stage_scales) into the
+// stage's free 1 KB after the weights, copies it to TMEM next to the constant
+// chunk (UE8M0 1, the weight side), and adds both K tiles into one
+// accumulator; the epilogue reads one TMEM column a token and multiplies by
+// the routing weight only. A step with an idle row (SlotsOld) keeps the code
+// without it (its h_q scales are powers of two as well: the same
+// h_quant_group_tok).
+// (W2UE) kind::mxf8f6f4 with e4m3 x e4m3 and N = n (a multiple of 16), scale
+// id sf (0..3) of both operands' chunks
+__device__ __forceinline__ uint32_t idesc_mx_e4m3_n(int n, uint32_t sf) {
+  return idesc_mx((IDESC_MX_E4M3 & ~(0x3Fu << 17)) | ((uint32_t)(n / 8) << 17),
+                  sf);
+}
+
 
 // what the bodies below use of the layer state, as slots and offsets
 // (compile-time; run_scaled_moe_experts fills it from the node's slots):
@@ -178,7 +200,8 @@ struct Slots {
   static constexpr int SPLIT = SPLIT_, SPLIT_SLOTS = MOE_SPLIT_SLOTS;
   // the layer's options (scaled_moe_experts_layer; params[2] bits): bit 0 off
   // the many-token W13 epilogue (MANY_EPI, T >= 32), bit 1 the W2 tiles in the
-  // slots' index order (W2_SLOT_ORDER) instead of the queue's slot order
+  // slots' index order (W2_SLOT_ORDER) instead of the queue's slot order, bit 2
+  // the W2 weights' scales powers of two (W2UE below)
   static constexpr bool MANY_EPI = (OPTS_ & 1) == 0,
                         W2_SLOT_ORDER = (OPTS_ & 2) != 0;
   static constexpr bool CAN_SPLIT = SPLIT >= 0 && !SINGLE && T <= 32;
@@ -210,6 +233,12 @@ struct Slots {
   // run_scaled_moe_experts). HQP: the rows of an h_q plane
   static constexpr bool W2C = T == 64 && LIVE == T && MANY_EPI && !SINGLE;
   static constexpr int HQP = NSLOT * T;
+  // W2UE above: with W2C and the layer's option 4 (the W2
+  // weights requantized to power-of-two scales on the host). HQ_UE: h_q's
+  // scales rounded up to powers of two (hq_out); SlotsOld keeps it (one
+  // h_quant_group_tok instance for both codes), W2UE it turns off
+  static constexpr bool W2UE = (OPTS_ & 4) != 0 && W2C;
+  static constexpr bool HQ_UE = W2UE;
   static_assert(NE % 32 == 0 && NE <= 1024,
                 "scaled_moe_experts: build_table's 8 warps x 128 experts");
   // the routing table of this step, built on every SM by build_table (shared
@@ -259,12 +288,13 @@ struct Slots {
   } // per entry: k
 };
 
-// (W2C) the layer's code for a step with an idle row: RES with W2C off.
-// Derived from RES, so the routing table's shared arrays (RES's member
-// functions) and the shared-memory layout (Smem: no W2C term) are RES's own.
+// (W2C) the layer's code for a step with an idle row: RES with W2C off (and
+// so W2UE). Derived from RES, so the routing table's shared arrays (RES's
+// member functions) and the shared-memory layout (Smem: no W2C term) are
+// RES's own.
 template <class RES>
 struct SlotsOld : RES {
-  static constexpr bool W2C = false;
+  static constexpr bool W2C = false, W2UE = false;
 };
 
 // (W2C) after the routing pairs are in sel() (wait_z_and_pairs
@@ -397,8 +427,10 @@ __device__ __forceinline__ void hq_amax(float const *ha,
 // h_q planes of pl rows, row slot T + j0 + 2 i (the token's place in the
 // slot's list), swizzled (hq_swz); the scale as before. (pl is a run-time
 // argument, a constant at every call: one instance of h_quant_group_tok's
-// shared red_s for the W2C code and the code without it in one kernel)
-template <int W, int IR>
+// shared red_s for the W2C code and the code without it in one kernel). UE
+// (Slots::HQ_UE): the scale is the power of two at or above max(amax, 1e-10)
+// / 448 (group_quant.cuh group_scale<true>, SGLang's scale_ue8m0)
+template <int W, int IR, bool UE = false>
 __device__ __forceinline__ void hq_out(uint8_t *hq,
                                        float *hs,
                                        float const *ha,
@@ -427,7 +459,11 @@ __device__ __forceinline__ void hq_out(uint8_t *hq,
   }
 #pragma unroll
   for (int i = 0; i < W; i++) {
-    sc[i] = fmaxf(fmaxf(r0[i], r1[i]), 1.0e-10f) * (1.0f / 448.0f);
+    if constexpr (UE) {
+      sc[i] = group_scale<true>(fmaxf(r0[i], r1[i]));
+    } else {
+      sc[i] = fmaxf(fmaxf(r0[i], r1[i]), 1.0e-10f) * (1.0f / 448.0f);
+    }
     float const rc = __frcp_rn(sc[i]);
     q0[i] = cvt_e4m3_nv(gq_div(a[i], sc[i], rc));
     q1[i] = cvt_e4m3_nv(gq_div(b[i], sc[i], rc));
@@ -483,8 +519,9 @@ __device__ __forceinline__ void h_silu_tok(float *dst,
 // then thread 64 adds 2 to CHQ[slot] (release; W2 waits for MT13). The other
 // tokens' entries are not written (W2 reads none of them). H: acc holds this
 // item's h ([64][T], T >= 32's epilogue), not its gate and up rows. pl > 0
-// (with H): h_q in planes of pl rows (hq_out)
-template <int IR, int LIMIT, bool H = false>
+// (with H): h_q in planes of pl rows (hq_out). UE (with H): power-of-two
+// scales (hq_out)
+template <int IR, int LIMIT, bool H = false, bool UE = false>
 __device__ __forceinline__ void h_quant_group_tok(uint8_t *hq,
                                                   float *hs,
                                                   uint32_t *chq,
@@ -512,11 +549,11 @@ __device__ __forceinline__ void h_quant_group_tok(uint8_t *hq,
     int const w0 = (row >> 6) * 2; // its two warps
     j = row >> 6;
     for (; j + 6 < nt; j += 8) {
-      hq_out<4, IR>(
+      hq_out<4, IR, UE>(
           hq, hs, ha, acc, red_s, tok, wide, slot, kt2, f, w0, j, pl);
     }
     for (; j < nt; j += 2) {
-      hq_out<1, IR>(
+      hq_out<1, IR, UE>(
           hq, hs, ha, acc, red_s, tok, wide, slot, kt2, f, w0, j, pl);
     }
   } else {
@@ -786,6 +823,39 @@ __device__ __forceinline__ void issue_w2_promoted_hq_n(uint32_t st,
   }
 }
 
+// (W2UE) issuer 0's elected lane, a W2 tile: the constant chunk
+// (csf_s in shared memory) to TMEM column csf, the tile's K tile kt scale
+// chunk (sfb_s + kt SF_CHUNK, the h_q side: row c the MMA's column c) to
+// column sfb + 4 kt, then both K tiles' block-scaled MMAs (N = n, scale id j
+// for the 32-byte step j of a K tile) into one accumulator at acc: the first
+// does not accumulate. The copies come first in this lane's tcgen05 order;
+// the previous MMAs that read these columns are done (the tick's acc_empty)
+template <int KT2>
+__device__ __forceinline__ void issue_w2_ue(uint32_t st,
+                                            uint32_t hq,
+                                            uint32_t acc,
+                                            int n,
+                                            uint32_t csf,
+                                            uint32_t sfb,
+                                            uint32_t csf_s,
+                                            uint32_t sfb_s) {
+  static_assert(KT2 <= 2, "scaled_moe_experts: W2's K tiles in the two halves");
+  cp_sf(csf, csf_s);
+#pragma unroll
+  for (int kt = 0; kt < KT2; kt++) {
+    cp_sf(sfb + 4 * kt, sfb_s + kt * SF_CHUNK);
+  }
+#pragma unroll
+  for (int kt = 0; kt < KT2; kt++) {
+    uint32_t const sf = sfb + 4 * kt;
+    uint64_t const dw = mkdesc(st + kt * 16384), dh = mkdesc(hq) + 8 * TW * kt;
+    mma_mx(acc, dw, dh, idesc_mx_e4m3_n(n, 0), kt == 0 ? 0u : 1u, csf, sf);
+    mma_mx(acc, dw + 2, dh + 2, idesc_mx_e4m3_n(n, 1), 1u, csf, sf);
+    mma_mx(acc, dw + 4, dh + 4, idesc_mx_e4m3_n(n, 2), 1u, csf, sf);
+    mma_mx(acc, dw + 6, dh + 6, idesc_mx_e4m3_n(n, 3), 1u, csf, sf);
+  }
+}
+
 // the 128 epilogue threads, after the acc_full of tick a: v[t] = the sum over
 // kt of sw[kt] sh[kt][t] x half kt of the columns of the tick (the row of
 // this thread)
@@ -873,6 +943,27 @@ struct Smem {
   static_assert(OFF_W2S - OFF_W2BAR + W2QD * W2S_BYTES <=
                     RES::KT2 * 1024 + RES::KT2 * SF_CHUNK,
                 "the W2 scale buffers fit the OFF_W2BAR area");
+  // (W2UE) shared memory: a W2 stage's K tile kt scale chunk at W2UE_SFB +
+  // kt SF_CHUNK of the stage (its free bytes after the weights: W2_STB rounds
+  // the weights and KT2 chunks up to 1 KB), the constant chunk (UE8M0 1) at
+  // OFF_W2UE_CSF after the h_q buffers (inside the W13 ring's area: written
+  // by issuer 0 at its first W2 tile, after the switch). TMEM: tick a's chunks
+  // at W2UE_COL + TW a (the constant one) and + 4 + 4 kt (the K tiles'), in
+  // issuer 0's piece-1 columns of tick a (scale_promotion.cuh PROMO_COL1: a W2
+  // tile's accumulator is columns TW a ..; the tick's acc_empty orders a W13
+  // round's drain and a previous tile's MMAs before the copies)
+  static constexpr int W2UE_SFB = RES::KT2 * 16384,
+                       OFF_W2UE_CSF = W2_ST * W2_STB + 2 * W2_HQB,
+                       W2UE_COL = PROMO_COL1;
+  static_assert(!RES::W2UE ||
+                    (T == 64 && W2UE_SFB + RES::KT2 * SF_CHUNK <= W2_STB &&
+                     W2UE_SFB % 128 == 0 && OFF_W2UE_CSF % 128 == 0 &&
+                     OFF_W2UE_CSF + SF_CHUNK <= OFF_WSF &&
+                     4 + 4 * RES::KT2 <= TW &&
+                     W2UE_COL + ACC_STAGES * TW <= 512),
+                "W2UE: the scale chunks in a W2 stage's free "
+                "bytes and after the h_q buffers, their TMEM columns in issuer "
+                "0's piece-1 accumulators");
   // TMEM: the constant scale chunk at CONST_SF; the accumulators of piece 1
   // from PROMO_COL1. W2's K tiles go into the two accumulator halves.
   static constexpr int CONST_SF = 232;
@@ -1469,6 +1560,11 @@ __device__ __forceinline__ void
     uint32_t const tbu = (uint32_t)warp_same<true>((int)tb),
                    baseu = (uint32_t)warp_same<true>((int)base);
     int wtt0 = warp_same<true>(wt), w2k = 0, e2 = 0; // e2: W2 entries (T = 64)
+    // (W2UE) issuer 0: the parities of the scale buffers' mbarriers (bit q:
+    // position q, as the epilogue's w2s_par without W2UE), the constant chunk
+    // written (its first W2 tile)
+    [[maybe_unused]] uint32_t w2s_par = 0;
+    [[maybe_unused]] bool ue_csf = false;
 #ifdef STATIC_TIMING_BUILD
     bool w2_seen = false;
 #endif
@@ -1500,6 +1596,42 @@ __device__ __forceinline__ void
               W2C_N *
               ((warp_same<true>(ntok_s[e.a / OT2]) + W2C_N - 1) / W2C_N));
         }
+        // (W2UE) issuer 0: the entry's scales landed (w2_stage_scales, buffer
+        // qpos); per lane the UE8M0 exponents eh of the h_q scales of places
+        // lane and lane + 32 of the slot (byte 2 c + kt; a place past the
+        // slot's tokens: none), the slot's token count and the 16-B chunk of
+        // its tiles' weight scales
+        [[maybe_unused]] uint32_t ue_eh = 0;
+        [[maybe_unused]] int ue_nt = 0, ue_n = 0, ue_ot = 0;
+        [[maybe_unused]] float const *ue_swc = nullptr;
+        if constexpr (RES::W2UE) {
+          static_assert(SM_::W2S_PER == 1 && KT2 == 2,
+                        "W2UE: a slot's own h_q scales, two "
+                        "K tiles");
+          if (iss == 0) {
+            mbar_wait(w2s_bar<RES>(baseu, qpos), (w2s_par >> qpos) & 1);
+            w2s_par ^= 1u << qpos;
+            int const slot = e.a / OT2, cb = warp_same<true>(start_s[slot]);
+            ue_nt = warp_same<true>(ntok_s[slot]);
+            ue_n = W2C_N * ((ue_nt + W2C_N - 1) / W2C_N);
+            ue_ot = (e.a - slot * OT2) & 1; // the tiles' place in the chunk
+            float const *const sbuf = reinterpret_cast<float const *>(
+                rt_sm() + SM_::OFF_W2S + qpos * SM_::W2S_BYTES);
+            ue_swc = sbuf + SM_::W2S_HS / 4;
+#pragma unroll
+            for (int c = 0; c < 2; c++) {
+              int const r = lane + 32 * c;
+              if (r < ue_nt) {
+                int const t = tok_s[cb + r];
+#pragma unroll
+                for (int kt = 0; kt < 2; kt++) {
+                  ue_eh |= ((__float_as_uint(sbuf[t * KT2 + kt]) >> 23) & 0xFFu)
+                           << (8 * (2 * c + kt));
+                }
+              }
+            }
+          }
+        }
         for (int i = 0; i < e.b;
              i++, w2k++) { // warp 1: the tile's 4 KT2 MMAs; warp 6: the
                            // second arrival on acc_full
@@ -1513,10 +1645,66 @@ __device__ __forceinline__ void
             }
             continue;
           }
+          // (W2UE) the chunks' words of this tile: lane l holds rows l + 32 c
+          // (c = 0..3; cp_sf's layout) of K tile kt, row c of a place < ntok
+          // the UE8M0 byte eh + ew - 127 (2^(eh - 127) 2^(ew - 127)), every
+          // other row 127 (1)
+          [[maybe_unused]] uint32_t ue_w[2][2];
+          if constexpr (RES::W2UE) {
+#pragma unroll
+            for (int kt = 0; kt < 2; kt++) {
+              int const ew =
+                  (int)((__float_as_uint(ue_swc[(ue_ot + i) * KT2 + kt]) >> 23) &
+                        0xFFu);
+#pragma unroll
+              for (int c = 0; c < 2; c++) {
+                int const x =
+                    (int)((ue_eh >> (8 * (2 * c + kt))) & 0xFFu) + ew - 127;
+                ue_w[kt][c] = lane + 32 * c < ue_nt
+                                  ? (uint32_t)min(max(x, 1), 254) * 0x01010101u
+                                  : 0x7F7F7F7Fu;
+              }
+            }
+          }
           mbar_wait(w2_bar<RES>(baseu, s), (w2k / W2_ST) & 1);
           fence_after();
+          if constexpr (RES::W2UE) { // the stage's chunks (its previous
+                                     // tile's copies are done: the stage was
+                                     // re-armed after its MMAs' commit), at
+                                     // the first tile the constant chunk too
+            uint32_t const sfb_s = baseu + s * W2_STB + SM_::W2UE_SFB;
+#pragma unroll
+            for (int kt = 0; kt < 2; kt++) {
+              asm volatile("st.shared.v4.u32 [%0], {%1, %2, %3, %4};" ::"r"(
+                               sfb_s + kt * SF_CHUNK + 16 * lane),
+                           "r"(ue_w[kt][0]),
+                           "r"(ue_w[kt][1]),
+                           "r"(0x7F7F7F7Fu),
+                           "r"(0x7F7F7F7Fu)
+                           : "memory");
+            }
+            if (!ue_csf) {
+              asm volatile("st.shared.v4.u32 [%0], {%1, %1, %1, %1};" ::"r"(
+                               baseu + SM_::OFF_W2UE_CSF + 16 * lane),
+                           "r"(0x7F7F7F7Fu)
+                           : "memory");
+              ue_csf = true;
+            }
+            asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+            __syncwarp();
+          }
           if (issuer_lane<true>()) { // one K tile in each accumulator half
-            if constexpr (RES::W2C) {
+            if constexpr (RES::W2UE) { // (one accumulator, the MMA scales)
+              uint32_t const csf = tbu + SM_::W2UE_COL + TW * a;
+              issue_w2_ue<KT2>(baseu + s * W2_STB,
+                               baseu + SM_::W2_HQ0 + (e2 & 1) * SM_::W2_HQB,
+                               tbu + TW * a,
+                               ue_n,
+                               csf,
+                               csf + 4,
+                               baseu + SM_::OFF_W2UE_CSF,
+                               baseu + s * W2_STB + SM_::W2UE_SFB);
+            } else if constexpr (RES::W2C) {
               issue_w2_promoted_hq_n<KT2>(
                   baseu + s * W2_STB,
                   baseu + SM_::W2_HQ0 + (e2 & 1) * SM_::W2_HQB,
@@ -1666,8 +1854,11 @@ __device__ __forceinline__ void
         // its first tile staged them after its CHQ acquire): the weight scales
         // of its tiles ([ot - (ot0 & ~1)][KT2] in the 16-B chunk), the slot's
         // h_q scales
-        mbar_wait(w2s_bar<RES>(base, qpos), (w2s_par >> qpos) & 1);
-        w2s_par ^= 1u << qpos;
+        // (W2UE: the MMA applied them; issuer 0 waits for the buffer instead)
+        if constexpr (!RES::W2UE) {
+          mbar_wait(w2s_bar<RES>(base, qpos), (w2s_par >> qpos) & 1);
+          w2s_par ^= 1u << qpos;
+        }
         float const *const sbuf0 = reinterpret_cast<float const *>(
             rt_sm() + SM_::OFF_W2S + qpos * SM_::W2S_BYTES);
         float const *const sbuf = sbuf0 + slot % SM_::W2S_PER * T * KT2,
@@ -1735,6 +1926,8 @@ __device__ __forceinline__ void
                 return t_;
               }
             };
+            // (W2UE) one accumulator: both K tiles, scaled by the MMA
+            constexpr bool C1 = KT2 == 2 && !RES::W2UE;
             for (; i0 + 8 <= end; i0 += 8) {
               float c0[8], c1[8], r[8];
               int t[8];
@@ -1743,21 +1936,26 @@ __device__ __forceinline__ void
                 t[k] = tok_s[i0 + k];
                 c0[k] = tmem_ld1(c0a + col(i0 + k, t[k]));
                 c1[k] = 0.f;
-                if constexpr (KT2 == 2) {
+                if constexpr (C1) {
                   c1[k] = tmem_ld1(c1a + col(i0 + k, t[k]));
                 }
               }
               tmem_keep8(c0);
-              tmem_keep8(c1);
+              if constexpr (!RES::W2UE) {
+                tmem_keep8(c1);
+              }
               if (i0 + 8 == end) { // the item's last columns are read
                 fence_before();
                 mbar_arrive(rt.acc_empty0 + 8 * a);
               }
 #pragma unroll
               for (int k = 0; k < 8; k++) { // drain_w2_promoted's products
-                float vt = c0[k] * (swi[0] * sbuf[t[k] * KT2]);
-                if constexpr (KT2 == 2) {
-                  vt = fmaf(swi[1] * sbuf[t[k] * KT2 + 1], c1[k], vt);
+                float vt = c0[k];
+                if constexpr (!RES::W2UE) {
+                  vt = c0[k] * (swi[0] * sbuf[t[k] * KT2]);
+                  if constexpr (KT2 == 2) {
+                    vt = fmaf(swi[1] * sbuf[t[k] * KT2 + 1], c1[k], vt);
+                  }
                 }
                 r[k] = w_s[i0 + k] * vt;
               }
@@ -1776,22 +1974,27 @@ __device__ __forceinline__ void
                 if (k < left) { // warp-uniform
                   int const t = tok_s[i0 + k];
                   c0[k] = tmem_ld1(c0a + col(i0 + k, t));
-                  if constexpr (KT2 == 2) {
+                  if constexpr (C1) {
                     c1[k] = tmem_ld1(c1a + col(i0 + k, t));
                   }
                 }
               }
               tmem_keep8(c0);
-              tmem_keep8(c1);
+              if constexpr (!RES::W2UE) {
+                tmem_keep8(c1);
+              }
               fence_before();
               mbar_arrive(rt.acc_empty0 + 8 * a);
 #pragma unroll
               for (int k = 0; k < 8; k++) {
                 if (k < left) {
                   int const i = i0 + k, t = tok_s[i];
-                  float vt = c0[k] * (swi[0] * sbuf[t * KT2]);
-                  if constexpr (KT2 == 2) {
-                    vt = fmaf(swi[1] * sbuf[t * KT2 + 1], c1[k], vt);
+                  float vt = c0[k];
+                  if constexpr (!RES::W2UE) {
+                    vt = c0[k] * (swi[0] * sbuf[t * KT2]);
+                    if constexpr (KT2 == 2) {
+                      vt = fmaf(swi[1] * sbuf[t * KT2 + 1], c1[k], vt);
+                    }
                   }
                   racc[((size_t)t * K + kk_s[i]) * LAT + ot * 128 + row] =
                       w_s[i] * vt; // row (t, k), plain store
@@ -1924,7 +2127,7 @@ __device__ __forceinline__ void
               }
               asm volatile("bar.sync 1, 128;" ::: "memory");
               if (i == 1) {
-                h_quant_group_tok<IR, RES::LIMIT, true>(
+                h_quant_group_tok<IR, RES::LIMIT, true, RES::HQ_UE>(
                     buf_at<uint8_t>(g, RES::HQ),
                     buf_at<float>(g, RES::HSF),
                     cnt_now(g) + RES::CHQ,
