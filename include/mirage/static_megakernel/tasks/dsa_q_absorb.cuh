@@ -1,7 +1,9 @@
 // tasks/dsa_q_absorb.cuh -- Compute the absorbed MLA query (GLM-5.3 / 5.2:
 // NOPE 192, ROPE 64; GLM-5.3-Flash: NOPE 256, ROPE 0). Task x is (head h,
 // latent column block cb) of the NH heads on this GPU. Each task does all T
-// tokens:
+// tokens (grid y 1), or task (x, y) the tokens [TT y, TT y + TT), TT = T / the
+// grid's y (T = 64: 2 tiles; all 64 tokens a task is 64 tasks, each with 64
+// fixed-point loads a thread, while more than half the SMs idle):
 //   q[t][h][cb 128 + c] = bf16( sum_k q_nope[t][h][k] W_UK[h][k][cb 128 + c] )
 // W_UK [NH][NOPE][512] bf16 is the dequantized K part of kv_b_proj. With
 // ROPE = 64, the task with cb = 0 also writes the rotated q_pe:
@@ -45,8 +47,12 @@ __device__ __forceinline__ void run_dsa_q_absorb(Maps const &,
                 SEQ = slot_at<BUF_SLOTS, 2>();
   static_assert(N == NH * QHD && (ROPE == 64 || ROPE == 0) && NOPE % 64 == 0,
                 "dsa_q_absorb: q_b has NOPE + ROPE columns per head");
+  constexpr int TT = T / SELF::y; // the task's tokens
   static_assert(SELF::x == NH * 4 && SELF::buf >= 0 && SELF::counter >= 0,
                 "dsa_q_absorb: 4 tasks per head, its output q and counter");
+  static_assert(SELF::y * TT == T &&
+                    (SELF::y == 1 || (TT % 8 == 0 && ROPE == 0)),
+                "dsa_q_absorb: token tiles of whole 8-token MMA tiles");
   static_assert(ROPE == 0 || T * 32 == 256,
                 "dsa_q_absorb: the q_pe step uses token tid / 32");
   auto *const ws = reinterpret_cast<__nv_bfloat16 *>(L.sm);
@@ -64,17 +70,36 @@ __device__ __forceinline__ void run_dsa_q_absorb(Maps const &,
   __syncthreads();
   dsa::stamp_ready(L);
   auto const *qb = buf_at<unsigned long long const>(g, QB::buf);
-  for (int i = tid; i < T * NOPE / 2; i += 256) {
-    int const t = i / (NOPE / 2), k = 2 * (i % (NOPE / 2));
-    *reinterpret_cast<__nv_bfloat162 *>(xs + dsa::swizzle<NOPE>(t, k)) =
-        __floats2bfloat162_rn(dsa::fx_bf16(qb, N, t, h * QHD + k),
-                              dsa::fx_bf16(qb, N, t, h * QHD + k + 1));
+  if constexpr (SELF::y == 1) {
+    for (int i = tid; i < T * NOPE / 2; i += 256) {
+      int const t = i / (NOPE / 2), k = 2 * (i % (NOPE / 2));
+      *reinterpret_cast<__nv_bfloat162 *>(xs + dsa::swizzle<NOPE>(t, k)) =
+          __floats2bfloat162_rn(dsa::fx_bf16(qb, N, t, h * QHD + k),
+                                dsa::fx_bf16(qb, N, t, h * QHD + k + 1));
+    }
+  } else { // the tile's tokens: row tl of xs is token TT y + tl
+    for (int i = tid; i < TT * NOPE / 2; i += 256) {
+      int const tl = i / (NOPE / 2), t = tk.y * TT + tl,
+                k = 2 * (i % (NOPE / 2));
+      *reinterpret_cast<__nv_bfloat162 *>(xs + dsa::swizzle<NOPE>(tl, k)) =
+          __floats2bfloat162_rn(dsa::fx_bf16(qb, N, t, h * QHD + k),
+                                dsa::fx_bf16(qb, N, t, h * QHD + k + 1));
+    }
   }
   dsa::copy_wait();
   __syncthreads();
   __nv_bfloat16 *q = buf_at<__nv_bfloat16>(g, SELF::buf);
-  dsa::absorb_mma<NOPE, QAB_COLS>(
-      ws, xs, nullptr, q + (size_t)h * D + cb * QAB_COLS, (size_t)NH * D);
+  if constexpr (SELF::y == 1) {
+    dsa::absorb_mma<NOPE, QAB_COLS>(
+        ws, xs, nullptr, q + (size_t)h * D + cb * QAB_COLS, (size_t)NH * D);
+  } else {
+    dsa::absorb_mma<NOPE, QAB_COLS, TT>(
+        ws,
+        xs,
+        nullptr,
+        q + ((size_t)tk.y * TT * NH + h) * D + cb * QAB_COLS,
+        (size_t)NH * D);
+  }
   if (ROPE > 0 && cb == 0) {
     // q_pe: thread tid takes token tid / 32 and pair tid % 32
     int const t = tid / 32, i = tid % 32;

@@ -159,7 +159,7 @@ __device__ __forceinline__ void gemm_tile_task(TileJob const &j,
             polled + (size_t)t * act_k + c));
       } while (!valid16(x));
       int const s_ = cg >> 4, a_ = (cg >> 3) & 1, k_ = cg & 7;
-      *reinterpret_cast<uint4 *>(sm + s_ * FSTAGE + W_STAGE + a_ * (T * 128) +
+      *reinterpret_cast<uint4 *>(sm + s_ * FSTAGE + W_STAGE + a_ * (TW * 128) +
                                  t * 128 + ((k_ ^ (t & 7)) << 4)) = x;
     }
     asm volatile("fence.proxy.async.shared::cta;" ::
@@ -200,7 +200,7 @@ __device__ __forceinline__ void gemm_tile_task(TileJob const &j,
                                             : nullptr)); // stamp[1] landed
     }
   } else if (warp >= 2 && warp <= 5) {
-    float v[T];
+    float v[TW];
     int const row = drain_acc<ROWS>(tb, a, par, v);
     if (ROWS == 128 || row >= 0) {
       switch (mode) { // 128 rows: every thread has one

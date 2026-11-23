@@ -157,9 +157,9 @@ __device__ __forceinline__ void mma_mx(uint32_t d,
 // chunk in TMEM, the accumulator ticks take all 512 columns (config.cuh
 // ACC_STAGES)
 constexpr bool F8_UNSCALED = T == 64;
-constexpr uint32_t IDESC_F8 = (1u << 4) | ((T / 8u) << 17) |
+constexpr uint32_t IDESC_F8 = (1u << 4) | ((TW / 8u) << 17) |
                               ((128u / 16u) << 24); // kind::f8f6f4: e4m3 x
-                                                    // e4m3 -> fp32, M128 N = T
+                                                    // e4m3 -> fp32, M128 N = TW
 __device__ __forceinline__ void
     mma_f8(uint32_t d, uint64_t a, uint64_t b, uint32_t en) {
   asm volatile("{\n.reg .pred p;\nsetp.ne.b32 p, %4, 0;\n"
@@ -786,7 +786,7 @@ __device__ __forceinline__ void load_job(TileJob const &j,
     } else {
       int const na = (j.natoms - 2 * s < 2) ? j.natoms - 2 * s
                                             : 2; // weight pieces in this stage
-      mbar_expect(full, na * (PIECE_BYTES + (WSF ? SF_CHUNK : 0) + T * 128));
+      mbar_expect(full, na * (PIECE_BYTES + (WSF ? SF_CHUNK : 0) + TW * 128));
       uint32_t const sf_dst = base + OFF_WSF + st * 2 * SF_CHUNK;
       if (na == 2) {
         tma3(j.wmap2, full, dst, 0, 0, j.tile0 + 2 * s, EVICT_FIRST);
@@ -839,7 +839,7 @@ __device__ __forceinline__ void
       tma3(j.wmap, full, dst, 0, j.row0, (j.k0 + s) * 2, EVICT_FIRST);
     } else {
       int const na = (j.natoms - 2 * s < 2) ? j.natoms - 2 * s : 2;
-      mbar_expect(full, na * (PIECE_BYTES + (WSF ? SF_CHUNK : 0) + T * 128));
+      mbar_expect(full, na * (PIECE_BYTES + (WSF ? SF_CHUNK : 0) + TW * 128));
       uint32_t const sf_dst = base + OFF_WSF + st * 2 * SF_CHUNK;
       if (na == 2) {
         tma3(j.wmap2, full, dst, 0, 0, j.tile0 + 2 * s, EVICT_FIRST);
@@ -902,7 +902,7 @@ __device__ __forceinline__ void issue_job(TileJob const &j,
                                           int iss,
                                           int &g,
                                           int a STAGE_STAMP_PARAM) {
-  uint32_t const acc = tb + T * a + ACC_STAGES * T * iss;
+  uint32_t const acc = tb + TW * a + ACC_STAGES * TW * iss;
   bool first = true;
   for (int s = 0; s < j.nst; s++, g++) {
     bool const mine = (s & 1) == iss;
@@ -923,7 +923,7 @@ __device__ __forceinline__ void issue_job(TileJob const &j,
                                      // 128 B each; T x 128 B of the
                                      // activation), 4 MMAs of K 16 each
       uint64_t const dw = mkdesc(wst + at * ROWS * 128),
-                     dx = mkdesc(ast + at * (T * 128));
+                     dx = mkdesc(ast + at * (TW * 128));
       for (int k = 0; k < 4; k++) {
         mma_bf16<ROWS>(
             acc, dw + 2 * k, dx + 2 * k, (first && k == 0) ? 0u : 1u);
@@ -951,7 +951,7 @@ __device__ __forceinline__ void
                    int &g,
                    int a,
                    uint32_t sfb_base STAGE_STAMP_PARAM) {
-  uint32_t const acc = tb + T * a + ACC_STAGES * T * iss;
+  uint32_t const acc = tb + TW * a + ACC_STAGES * TW * iss;
   bool first = true;
   for (int s = 0; s < j.nst; s++, g++) {
     bool const mine = (s & 1) == iss;
@@ -978,7 +978,8 @@ __device__ __forceinline__ void
         cp_sf(sfp, base + OFF_WSF + (st * 2 + at) * SF_CHUNK);
       }
       uint64_t const dw = mkdesc(base + st * FSTAGE + at * 16384);
-      uint64_t const db = mkdesc(base + st * FSTAGE + W_STAGE + at * (T * 128));
+      uint64_t const db =
+          mkdesc(base + st * FSTAGE + W_STAGE + at * (TW * 128));
       uint32_t const sfb = sfb_base + 4 * (j.k0 + atom);
       if (one) {
         mma_mx(acc, dw, db, idesc_mx(0), first ? 0u : 1u, sfp, sfb);
@@ -1000,11 +1001,11 @@ __device__ __forceinline__ void
 }
 
 // epilogue (warps 2..5, 128 threads): wait for accumulator stage a, add the two
-// issuers' accumulators -> v[T] (one per token) of this thread's row; returns
-// the row (0..ROWS-1), or -1 for a thread without a row. ROWS = 128: row = TMEM
-// lane. ROWS = 64 (MMA M = 64): each warp's 32-lane TMEM slice holds 16 rows in
-// lanes 0..15 (16 data paths per slice), so row = 16 x slice + lane for lanes
-// 0..15 and lanes 16..31 have no row
+// issuers' accumulators -> v[TW] (one per token: the first T) of this thread's
+// row; returns the row (0..ROWS-1), or -1 for a thread without a row. ROWS =
+// 128: row = TMEM lane. ROWS = 64 (MMA M = 64): each warp's 32-lane TMEM slice
+// holds 16 rows in lanes 0..15 (16 data paths per slice), so row = 16 x slice +
+// lane for lanes 0..15 and lanes 16..31 have no row
 template <int ROWS = 128>
 __device__ int drain_acc(uint32_t tb, int a, int parity, float *v) {
   int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31, lgrp = warp & 3;
@@ -1012,13 +1013,13 @@ __device__ int drain_acc(uint32_t tb, int a, int parity, float *v) {
       (ROWS == 128) ? lgrp * 32 + lane : (lane < 16 ? lgrp * 16 + lane : -1);
   mbar_wait(rt.acc_full0 + 8 * a, parity);
   fence_after();
-  float v2[T];
+  float v2[TW];
   // both issuers' loads before one wait
-  tmem_ld_cols_nw<T>(tb + T * a + ((uint32_t)(lgrp * 32) << 16), v);
-  tmem_ld_cols_nw<T>(
-      tb + T * a + ACC_STAGES * T + ((uint32_t)(lgrp * 32) << 16), v2);
-  tmem_keep_cols<T>(v);
-  tmem_keep_cols<T>(v2);
+  tmem_ld_cols_nw<TW>(tb + TW * a + ((uint32_t)(lgrp * 32) << 16), v);
+  tmem_ld_cols_nw<TW>(
+      tb + TW * a + ACC_STAGES * TW + ((uint32_t)(lgrp * 32) << 16), v2);
+  tmem_keep_cols<TW>(v);
+  tmem_keep_cols<TW>(v2);
 #pragma unroll
   for (int t = 0; t < T; t++) {
     v[t] += v2[t];

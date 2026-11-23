@@ -141,31 +141,24 @@ def tp_o_proj(y, w_o, tp: int):
     return bf(acc)
 
 
-def ref_kda(x, w, conv_state, rec, lower_bound=-5.0, norm_eps=1e-5, tp: int = 1, ntok: int = 1, accepted=None):
-    """One step of T / ntok requests: request r's tokens r ntok .. r ntok + ntok - 1, in order (ntok > 1: a
-    speculative-decoding verify step, vLLM's spec path). Token t's state slot is t; request r's conv state row is r ntok
-    ([R', 3 NH D, ntok + 2], oldest first). accepted [T / ntok] (ntok > 1): the previous step's accepted tokens a: the
-    initial state is slot r ntok + a - 1, the conv window starts at entry a - 1; the state after token i goes to slot
-    r ntok + i. Returns (o_proj output, o after the gated norm, new conv state, new recurrent state); o_proj summed as TP
-    `tp` does."""
+def ref_kda(x, w, conv_state, rec, lower_bound=-5.0, norm_eps=1e-5, tp: int = 1):
+    """One decode step of T requests: token t's state slot and conv state row are t ([T, 3 NH D, 3], oldest first).
+    Returns (o_proj output, o after the gated norm, new conv state, new recurrent state); o_proj summed as TP `tp`
+    does."""
     dev = x.device
     NH = w["num_heads"]
     T = x.shape[0]
-    R = T // ntok
-    acc = [1] * R if ntok == 1 else [int(a) for a in accepted]
-    assert conv_state.shape[2] == ntok + 2 and all(1 <= a <= ntok for a in acc)
+    assert conv_state.shape[2] == 3
     q, k, v = mm_bf16(x, w["q"].to(dev)), mm_bf16(x, w["k"].to(dev)), mm_bf16(x, w["v"].to(dev))
     b, fa, ga = mm_bf16(x, w["b"].to(dev)), mm_bf16(x, w["f_a"].to(dev)), mm_bf16(x, w["g_a"].to(dev))
     qkv = torch.cat([q, k, v], 1)                                            # [T, 3 NH D] bf16
     conv_w = torch.cat([w["q_conv"], w["k_conv"], w["v_conv"]], 0).to(dev)   # [3 NH D, 4]
     co = torch.empty(T, qkv.shape[1], dtype=torch.float32, device=dev)
     new_conv = conv_state.clone()
-    for r in range(R):   # causal_conv1d_update with num_accepted_tokens (its spec rolling)
-        t0, off = r * ntok, acc[r] - 1
-        xs = torch.cat([conv_state[t0, :, off:off + 3].float(), qkv[t0:t0 + ntok].float().t()], 1)   # [C, 3 + ntok]
-        for i in range(ntok):
-            co[t0 + i] = (xs[:, i:i + 4] * conv_w).sum(-1)
-        new_conv[t0] = torch.cat([conv_state[t0, :, off + 1:off + 3], qkv[t0:t0 + ntok].t()], 1)
+    for t in range(T):   # causal_conv1d_update
+        xs = torch.cat([conv_state[t].float(), qkv[t:t + 1].float().t()], 1)   # [C, 4]
+        co[t] = (xs * conv_w).sum(-1)
+        new_conv[t] = torch.cat([conv_state[t, :, 1:3], qkv[t:t + 1].t()], 1)
     co = bf(co * torch.sigmoid(co)).float()
     cq, ck, cv = co.split(NH * D, 1)
     g1 = mm_bf16(fa, w["f_b"].to(dev)).float().view(T, NH, D)
@@ -180,16 +173,14 @@ def ref_kda(x, w, conv_state, rec, lower_bound=-5.0, norm_eps=1e-5, tp: int = 1,
     cv = cv.view(T, NH, D)
     o = torch.empty(T, NH, D, dtype=torch.float32, device=dev)
     new_rec = rec.clone()
-    for r in range(R):   # fused_recurrent_kda with num_accepted_tokens: one state slot per token
-        t0 = r * ntok
-        S = rec[t0 + acc[r] - 1].float()                                     # [NH, V, K]
-        for t in range(t0, t0 + ntok):
-            S = S * torch.exp(gate[t]).unsqueeze(1)
-            kv = (S * kn[t].unsqueeze(1)).sum(-1)
-            delta = (cv[t] - kv) * beta[t].unsqueeze(-1)
-            S = S + delta.unsqueeze(-1) * kn[t].unsqueeze(1)
-            o[t] = bf((S * qn[t].unsqueeze(1)).sum(-1)).float()
-            new_rec[t] = S
+    for t in range(T):   # fused_recurrent_kda: one state slot per token
+        S = rec[t].float()                                                   # [NH, V, K]
+        S = S * torch.exp(gate[t]).unsqueeze(1)
+        kv = (S * kn[t].unsqueeze(1)).sum(-1)
+        delta = (cv[t] - kv) * beta[t].unsqueeze(-1)
+        S = S + delta.unsqueeze(-1) * kn[t].unsqueeze(1)
+        o[t] = bf((S * qn[t].unsqueeze(1)).sum(-1)).float()
+        new_rec[t] = S
     y = o * torch.rsqrt(o.square().mean(-1, keepdim=True) + norm_eps) * w["o_norm"].to(dev) * torch.sigmoid(og)
     y = bf(y).reshape(T, NH * D)
     return tp_o_proj(y, w["o_proj"].to(dev), tp), y, new_conv, new_rec

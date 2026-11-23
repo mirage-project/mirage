@@ -168,13 +168,14 @@ static void
                                 CU_TENSOR_MAP_L2_PROMOTION_NONE,
                                 CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
 }
-// e4m3 [rows, Kb] as {128, rows, Kb / 128}; box {128, T, nkt}: nkt K tiles of
-// T rows (the tokens of a step: the MMA's N)
+// e4m3 [rows, Kb] as {128, rows, Kb / 128}; box {128, TW, nkt}: nkt K tiles of
+// TW rows (the tokens of a step: the MMA's N; T < 8: the rows past the tensor's
+// T are outside it and read as 0)
 static void map_act8_kt(
     CUtensorMap *m, void *base, uint64_t Kb, uint64_t rows, uint32_t nkt) {
   cuuint64_t gd[3] = {128, rows, Kb / 128};
   cuuint64_t gs[2] = {Kb, 128};
-  cuuint32_t bd[3] = {128, (cuuint32_t)T, nkt}, es[3] = {1, 1, 1};
+  cuuint32_t bd[3] = {128, (cuuint32_t)TW, nkt}, es[3] = {1, 1, 1};
   MKS_CU(cuTensorMapEncodeTiled(m,
                                 CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                 3,
@@ -188,11 +189,11 @@ static void map_act8_kt(
                                 CU_TENSOR_MAP_L2_PROMOTION_NONE,
                                 CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
 }
-// e4m3 [rows, Kb]; box {128, T} (T rows: the tokens of a step)
+// e4m3 [rows, Kb]; box {128, TW} (TW rows: the tokens of a step, as above)
 static void map_act8(CUtensorMap *m, void *base, uint64_t Kb, uint64_t rows) {
   cuuint64_t gd[2] = {Kb, rows};
   cuuint64_t gs[1] = {Kb};
-  cuuint32_t bd[2] = {128, (cuuint32_t)T}, es[2] = {1, 1};
+  cuuint32_t bd[2] = {128, (cuuint32_t)TW}, es[2] = {1, 1};
   MKS_CU(cuTensorMapEncodeTiled(m,
                                 CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                 2,
@@ -715,6 +716,12 @@ static void static_host_init(StaticContext &ctx,
       MKS_CK(cudaMemset(g.rv, 0, 2 * EXCHANGE_SET));
       g.mc = nullptr;
     }
+#ifdef STATIC_AR_TWOSHOT
+    for (int q = 0; q < GPUS; q++) { // every GPU's copy (one process: mapped
+                                     // for every GPU, mc_alloc)
+      g.peer[q] = GPUS > 1 ? recv[q] : g.rv;
+    }
+#endif
     s.args = args;
     s.tensors = v.tensors;
     build_bufs(s, v.tensors, args);
@@ -733,12 +740,15 @@ static void static_host_init(StaticContext &ctx,
 // lands in every rank's copy), rv this GPU's copy, e.g. torch symmetric memory
 // over the TP group (SGLang's custom all-reduce allocates its push buffers that
 // way). No peer access: the kernel stores through mc and reads its own copy.
+// peers (STATIC_AR_TWOSHOT, GPUS > 1): every rank's copy mapped in this
+// process (torch symmetric memory's buffer_ptrs), peers[rank] = rv
 static void
     static_host_init_rank(StaticContext &ctx,
                           std::map<std::string, std::string> const &args,
                           int rank,
                           unsigned char *mc,
-                          unsigned char *rv) {
+                          unsigned char *rv,
+                          std::vector<unsigned char *> const &peers = {}) {
   using namespace static_host;
   if (ctx.num_gpus != 1 || rank < 0 || rank >= GPUS || rv == nullptr ||
       (GPUS > 1 && mc == nullptr)) {
@@ -770,6 +780,22 @@ static void
   g.rank = rank;
   g.mc = GPUS > 1 ? mc : nullptr;
   g.rv = rv;
+#ifdef STATIC_AR_TWOSHOT
+  if (GPUS > 1 && ((int)peers.size() != GPUS || peers[rank] != rv)) {
+    fprintf(stderr,
+            "static_host: init_rank: STATIC_AR_TWOSHOT stores into the "
+            "owner's copy: every rank's exchange region (got %zu, rank %d's "
+            "%p, local %p)\n",
+            peers.size(),
+            rank,
+            peers.size() > (size_t)rank ? (void *)peers[rank] : nullptr,
+            (void *)rv);
+    exit(1);
+  }
+  for (int q = 0; q < GPUS; q++) {
+    g.peer[q] = GPUS > 1 ? peers[q] : rv;
+  }
+#endif
   s.args = args;
   s.tensors = v.tensors;
   build_bufs(s, v.tensors, args);
