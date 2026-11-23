@@ -157,6 +157,8 @@ def gpu_tensors(b: dict, x: torch.Tensor, attn_next: dict = None) -> dict:
              h_post=torch.zeros(T, HC, dtype=torch.float32, device=dev),
              h_res=torch.zeros(T, HC * HC, dtype=torch.float32, device=dev),
              streams_out=torch.zeros(T, HC * H, dtype=torch.bfloat16, device=dev))
+    if T == 64:   # the experts a launch used first, for the next launch's W13 prefetch (scaled_moe_experts_layer last)
+        t["moe_last"] = torch.zeros(1 + 40, dtype=torch.int32, device=dev)
     if attn_next is not None:   # the next layer's attention mHC pre at the end (build_graph): its parameters, the outputs
         hc_small = torch.zeros(32, dtype=torch.float32)
         hc_small[:HC * (HC + 2)], hc_small[HC * (HC + 2):HC * (HC + 2) + 3] = \
@@ -179,7 +181,7 @@ def build_graph(mpk, t: dict, attn_next: dict = None, valid_rows: int = None) ->
                           sum over the GPUs, the mHC post, the next attention's mixes with hc_attn_fn) -> hc_pre (the next
                           layer's x_attn = RMSNorm(sum_i pre_i R'_i) input_layernorm, its h_post / h_res exported) -> x_attn,
                           h_post_next, h_res_next
-    valid_rows: the live rows of a speculative verify step (the rows past them are not routed)."""
+    valid_rows: the live rows of a decode step of fewer requests than T (the rows past them are not routed)."""
     mpk.max_counter_lines = 24   # 10 / 14 / 23 counter lines at T = 8 / 16 / 32 (scaled_moe_experts' per-slot counters), more
                                  # than config.cuh's default 16 (STATIC_NODE_COUNTER_LINES)
     a = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in t.items()}
@@ -194,7 +196,8 @@ def build_graph(mpk, t: dict, attn_next: dict = None, valid_rows: int = None) ->
     mpk.group_quant_layer(input=a["x"], output=z_q)                                                  # x in FP8, fp32 scales
     mpk.scaled_moe_experts_layer(z_q=z_q, pairs=a["routing_pairs"], w13=a["w13"], w13_scales=a["w13_sf"],
                                  w2=a["w2"], w2_scales=a["w2_sf"], output=a["routed_rows"], swiglu_limit=LIMIT,
-                                 prof=a.get("moe_prof"))                                             # --prof-experts
+                                 prof=a.get("moe_prof"),                                             # --prof-experts
+                                 last=a.get("moe_last"))                                             # T = 64
     r_sent = nt((T, H), bfloat16, "r_sent")
     mpk.allreduce_send_layer(input=a["routed_rows"], output=r_sent)                                  # a token's 18 rows added
     if "x_attn" in t:   # the mHC post and the next layer's attention mHC pre
@@ -573,8 +576,8 @@ def main():
                     "bit (a kernel change that keeps the rounding, same --layer --rank --seed)")
     ap.add_argument("--prof-experts", action="store_true", help="the experts node's per-SM stamps (scaled_moe_experts_layer "
                     "prof=): where its time goes, for the last timed launch")
-    ap.add_argument("--valid-rows", type=int, default=0, help="the live rows (a speculative verify step): the rows past "
-                    "them are not routed (topk_route valid_rows); the checks on the live rows")
+    ap.add_argument("--valid-rows", type=int, default=0, help="the live rows (a decode step of fewer requests than T): the "
+                    "rows past them are not routed (topk_route valid_rows); the checks on the live rows")
     args = ap.parse_args()
     torch.backends.cuda.matmul.allow_tf32 = False
     dev = torch.device("cuda", 0)
