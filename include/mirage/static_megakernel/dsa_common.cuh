@@ -71,6 +71,92 @@ __device__ __forceinline__ void stamp_ready(KernelLocals &L) {
 #endif
 }
 
+// ATTN64_IDXSKIP (T = 64 only: the generated layer of a GLM-5.3 indexer
+// defines STATIC_DSA_IDX_SHORT, static_schedule.header_code). Example: 64
+// requests of 300 positions, TOPK 2048. Every dsa_index_score task (16 chunks
+// x 64 tokens) and every dsa_index_topk task (16 x 64, two nodes) of the
+// launch has no work: the top-k takes all
+// positions of each token, so nobody reads a score, a record or a selected
+// index (sparse_mla of KPOOL 1 reads idx only when seq_lens[t] > TOPK). Then
+// such a task returns at its entry: no load, no barrier, no counter add. No
+// task waits on those counters in such a launch: dsa_index_topk count waits
+// for the score counter + t only if n > TOPK, write for the count counter + t
+// only if n > TOPK, sparse_mla for the write counter + t only if seq_lens[t] >
+// TOPK. The first such task on an SM loads the T seq_lens once
+// (idx_all_short); the later ones read the answer from KernelLocals.
+#if STATIC_TOKENS == 64 && defined(STATIC_DSA_IDX_SHORT)
+constexpr bool ATTN64_IDXSKIP = true;
+#else
+constexpr bool ATTN64_IDXSKIP = false; // (KernelLocals has no idx_short)
+#endif
+
+// (ATTN64_IDXSKIP) Whether every seq_lens[t] (buffer slot SEQ, int32 [T]) is
+// at most K, for this launch. All threads of the CTA call it at a task's
+// entry. The first call on the SM loads the T values (one barrier: the
+// __syncthreads_and); the later calls with the same K use L.idx_short.
+template <int K, int SEQ>
+__device__ __forceinline__ bool idx_all_short(G const &g, KernelLocals &L) {
+  static_assert(ATTN64_IDXSKIP && K > 0 && T <= 256,
+                "idx_all_short: T = 64 with ATTN64_IDXSKIP, K > 0");
+#if STATIC_TOKENS == 64 && defined(STATIC_DSA_IDX_SHORT)
+  if (L.idx_short == K || L.idx_short == -K) {
+    return L.idx_short == K;
+  }
+  int const t = threadIdx.x;
+  bool const shrt =
+      __syncthreads_and(t >= T || buf_at<int const>(g, SEQ)[t] <= K);
+  L.idx_short = shrt ? K : -K;
+  return shrt;
+#else
+  return false;
+#endif
+}
+
+// ATTN64_MERGENS (T = 64 only). Example: TOPK 2048, S = 8 sparse_mla splits
+// of 4 tiles (256 slots) each, a token of seq_lens 300: splits 0 and 1 hold
+// valid slots, splits 2..7
+// are empty. sparse_mla's empty split (KPOOL 1) returns at its entry with no
+// barrier and no counter add, and dsa_mla_merge waits for counter + t to reach
+// mla_live_splits(300) = 2 instead of S = 8. Both use mla_live_splits: split
+// s is empty if and only if s >= mla_live_splits(live). No other node waits
+// on the counter of a KPOOL-1 sparse_mla (dsa_o_absorb's MERGE reads only a
+// KPOOL > 1 sparse_mla).
+constexpr bool ATTN64_MERGENS = T == 64;
+constexpr int MLA_KV_TILE = 64; // sparse_mla's tile of index slots (KV_TILE)
+
+// ATTN64_MLALIVE (T = 64 only). The tiles of a split from the token's valid
+// slots instead of TOPK, so that the work of a token spreads over
+// MLA_LIVE_SPLITS = 148 / 64 = 2 splits
+// (64 tokens x 2 = 128 tasks: one round of the SMs). Example: TOPK 2048, S =
+// 8, seq_lens 300 = 5 tiles: TOPK / 64 / S = 4 tiles a split gives splits of
+// 256 + 44 rows; ceil(5 / 2) = 3 tiles gives 192 + 108 rows. At most TOPK /
+// 64 / S tiles (seq_lens >= 2048: as before), at least 1.
+constexpr bool ATTN64_MLALIVE = T == 64;
+constexpr int MLA_LIVE_SPLITS = NSM / T > 1 ? NSM / T : 1;
+
+// sparse_mla of KPOOL 1 (TOPK index slots, S splits): the tiles of 64 slots
+// of each split of a token of `live` valid slots (min(seq_lens, TOPK)). Split
+// s takes tiles [s per, s per + per).
+template <int TOPK, int S>
+__device__ __forceinline__ int mla_split_tiles(int live) {
+  static_assert(TOPK % (MLA_KV_TILE * S) == 0,
+                "sparse_mla: whole tiles of 64 slots in each split");
+  constexpr int PER = TOPK / (MLA_KV_TILE * S);
+  if constexpr (ATTN64_MLALIVE) {
+    int const tiles = (live + MLA_KV_TILE - 1) / MLA_KV_TILE;
+    return max(1,
+               min(PER, (tiles + MLA_LIVE_SPLITS - 1) / MLA_LIVE_SPLITS));
+  }
+  return PER;
+}
+// The splits that hold a valid slot of a token of `live` valid slots: split s
+// holds one if and only if s < mla_live_splits(live) (s per 64 < live).
+template <int TOPK, int S>
+__device__ __forceinline__ int mla_live_splits(int live) {
+  int const rows = MLA_KV_TILE * mla_split_tiles<TOPK, S>(live);
+  return (live + rows - 1) / rows;
+}
+
 // Return the 16-bit key of a fp32 score that holds a bf16 value. A larger
 // score gives a larger key. The 32-bit key flips all bits of a negative score
 // and sets the sign bit of a positive score. The low 16 bits of the score are
