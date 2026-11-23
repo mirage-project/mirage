@@ -54,12 +54,6 @@ __device__ __forceinline__ int
 struct Sm90DecodeSplit {
   int cached, lo, t0, tiles, n;
 };
-// STATIC_ATTN_MIN_TILES: at least this many tiles a split (a short window or
-// context in fewer, longer splits: a unit's fixed costs -- the wait, RoPE, the
-// new K / V, its parts -- and the merge's parts dominate one-tile splits)
-#ifndef STATIC_ATTN_MIN_TILES
-#define STATIC_ATTN_MIN_TILES 1
-#endif
 template <int PAGE, int WINDOW>
 __device__ __forceinline__ int
     sm90_decode_tiles(int const *kv_indptr, int const *last_page_len, int r) {
@@ -76,7 +70,7 @@ __device__ __forceinline__ Sm90DecodeSplit sm90_decode_split(
   s.t0 = s.lo / 32;
   int const tiles = (s.cached + 31) / 32 - s.t0;
   int n = total > 0 ? (int)((long long)UNITS_PER_SM * sms * tiles / total) : 1;
-  n = ONE ? 1 : max(min(n, tiles / STATIC_ATTN_MIN_TILES), 1);
+  n = ONE ? 1 : max(n, 1);
   s.tiles = max((tiles + n - 1) / n, 1);
   s.n = max((tiles + s.tiles - 1) / s.tiles, 1);
   return s;

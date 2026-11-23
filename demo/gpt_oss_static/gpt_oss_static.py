@@ -19,12 +19,11 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import torch
 from mirage.mpk import compiler, cost_records, plan_gen, search, static_schedule
 from mirage.mpk.static_harness import Harness
-from mirage.core import uint8
 from mirage.mpk.static_megakernel import (StaticMegakernel, sm90_attention_parts_size, sm90_flags,
                                          sm90_moe_pack, sm100_flags)
 from mirage.mpk.sm90_moe_split import Sm90MoeSplit, sm90_moe_split_weights
 from mirage.mpk.models.utils import shuffle_tensors
-from mxfp4 import Mxfp4Checkpoint, convert_expert_weight, prepare_gpt_oss_expert_bank
+from mxfp4 import Mxfp4Checkpoint, convert_expert_weight
 
 FI_GEMM2_WIDTH = 3072   # FlashInfer's unfinalized MoE rows (flashinfer_moe.H_PAD; Model checks): gpt_oss_moe_norm's row stride
 T, PAGE = 8, 64                       # token rows of a step (main: the bucket of the batch), KV page size
@@ -32,18 +31,18 @@ BUCKETS = (8, 16, 32, 64)             # the kernels' token rows, as the other st
                                       # smallest >= R; rows past R idle)
 PLANS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plans")
 SERVE = ["-DSTATIC_RESET_IN_KERNEL", "-DSTATIC_PDL_TRIGGER=1"]   # serving build: launches back to back
-FLAGS = sm90_flags() + SERVE
 # the kernels' architecture: the GPU's, 90 (Hopper) or 100 (Blackwell)
 CC = 100 if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 10 else 90
-NATIVE_PAD = 2944                     # Blackwell's native experts (gpt_oss_moe_experts): H and I padded to 23 K tiles
 O_PARTS = 4   # o_proj's K parts a plan may choose (o32 holds them all; the gate adds them)
 QKV_K = 3072   # Blackwell: the QKV weight's K zero-padded to 24 tiles of 128, so a plan may split it (QKV_PARTS parts in
 QKV_PARTS = 4  # qkv32; the split attention adds them)
+DIRECT_MAX_SEQ = 4096   # Blackwell's full layers: the direct split attention up to this cache, trtllm-gen past it
+FI_PINS = os.path.join(PLANS, "b200", "fi_tactics.json")   # FlashInfer MoE tactics pinned per batch (flashinfer_moe)
 
 
 def qkv_parts() -> int:
-    """The QKV GEMM's K parts a plan may choose: Blackwell's split attention adds them (MPK's sm100 attention: one)."""
-    return QKV_PARTS if CC == 100 and os.environ.get("GPTOSS_ATTN") != "sm100" else 1
+    """The QKV GEMM's K parts a plan may choose: Blackwell's attention tasks add them."""
+    return QKV_PARTS if CC == 100 else 1
 
 
 def pad_k(w: torch.Tensor) -> torch.Tensor:
@@ -55,40 +54,42 @@ def min_kparts(gemm: str) -> int:
     """The QKV ("qkv") and o_proj ("o") GEMMs' fewest K parts on Blackwell, where the plan's fewer parts stream from too few
     SMs while the attention or the gate waits on the GEMM: 32+ token rows, 2 (one part a 128-row block from 40 / 45 SMs;
     64 requests at 8K: the sliding layer 57.9 -> 48.4 us); 8 rows, the QKV GEMM 3 (2 requests' plan, 80 tasks: the full
-    layer's QKV GEMM ends at 15.1 us, the 8-request plan's 120 at 10.5). GPTOSS_MIN_KPARTS overrides both."""
-    if os.environ.get("GPTOSS_MIN_KPARTS"):
-        return int(os.environ["GPTOSS_MIN_KPARTS"])
+    layer's QKV GEMM ends at 15.1 us, the 8-request plan's 120 at 10.5)."""
     if CC != 100:
         return 1
     return 2 if T >= 32 else (3 if T == 8 and gemm == "qkv" else 1)
 
 
-def pad_rows(w: torch.Tensor) -> torch.Tensor:
-    """o_proj's weight [H, Q D] on Blackwell with its rows zero-padded to whole 128-row tiles (NATIVE_PAD): 23 tiles of
-    128 rows instead of 45 of 64 (a 128-row task streams its weight about twice as fast; the rows past H not stored)."""
-    if CC != 100 or w.shape[0] % 128 == 0 or os.environ.get("GPTOSS_O_PAD", "0") != "1":
-        return w
-    return torch.nn.functional.pad(w, (0, 0, 0, -w.shape[0] % 128)).contiguous()
-
-
 def flags() -> list:
-    """The layer kernels' build flags. Blackwell: the split attention's splits at least GPTOSS_ATTN_MIN_TILES tiles of 32
-    positions (a 128-position window: one split a request, no one-tile units over all SMs)."""
+    """The layer kernels' build flags."""
+    return (sm100_flags() if CC == 100 else sm90_flags()) + SERVE
+
+
+def full_attention(m) -> str:
+    """The full-attention layers' attention. Hopper: "split", the KV split over the SMs, then the merge (with the
+    sinks). Blackwell, measured on B200 against the split + merge (the same prompt-forced tokens, ms a step): up to
+    DIRECT_MAX_SEQ positions "direct", the split task's direct mode, a unit a request and head group writing its heads'
+    output with the sinks, no merge node (8 / 16 / 64 requests at 176 positions: -0.12 / -0.17 / -0.17, -2.4 .. -3.9%);
+    past it "trtllm", FlashInfer's trtllm-gen decode (SGLang's B200 kernel; trtllm_attn.py) between two static kernels
+    a layer, "full_a" (the norm, the QKV GEMM, gpt_oss_rope_append) and "full_b" (o_proj, the gate) (64 x 8K: -0.37,
+    8 x 32K: -0.19; -3.5%, -3.7%; at 64 x 8K 0.10 ms a step faster than "direct")."""
     if CC != 100:
-        return sm90_flags() + SERVE
-    return sm100_flags() + SERVE + os.environ.get("GPTOSS_XFLAGS", "").split() + [f"-DSTATIC_ATTN_MIN_TILES={int(os.environ.get('GPTOSS_ATTN_MIN_TILES', 1))}"]
+        return "split"
+    return "direct" if m.max_seq <= DIRECT_MAX_SEQ else "trtllm"
 
 
 def moe_kind(requests: int) -> str:
-    """The routed experts, after the layer kernel unless "native". Hopper: sm90_moe_split ("mpk") up to 16 requests,
-    triton_kernels' matmul_ogs ("triton", triton_moe.py) from 32 (120B graphed decode step: 8 requests 7.34 vs 7.62 ms,
-    16: 9.72 vs 9.55, 64: 30.7 -> 16.6; plans/h100/README.md). Blackwell: FlashInfer's trtllm-gen MXFP4 MoE
-    ("flashinfer", flashinfer_moe.py: vLLM's B200 GPT-OSS kernel; 120B, 8 requests, real routing: 5.46 ms a step vs
-    6.25 with the native task), or the native tcgen05 task in the layer kernel ("mpk": gpt_oss_moe_experts, 8 token
-    rows). GPTOSS_MOE=mpk|triton|flashinfer picks one; a missing package falls back to the architecture's own kernel."""
+    """The routed experts, after the layer kernel. Blackwell: FlashInfer's trtllm-gen MXFP4 MoE ("flashinfer",
+    flashinfer_moe.py: SGLang's B200 GPT-OSS path). Hopper: sm90_moe_split ("mpk") up to 16 requests, triton_kernels'
+    matmul_ogs ("triton", triton_moe.py) from 32 (120B graphed decode step: 8 requests 7.34 vs 7.62 ms, 16: 9.72 vs
+    9.55, 64: 30.7 -> 16.6; plans/h100/README.md); GPTOSS_MOE=mpk|triton picks one, a missing triton_kernels falls
+    back to "mpk"."""
+    if CC == 100:
+        __import__("flashinfer_moe")   # Blackwell needs FlashInfer
+        return "flashinfer"
     want = os.environ.get("GPTOSS_MOE", "")
-    kind = want or ("triton" if CC == 90 and requests >= 32 else "flashinfer" if CC == 100 else "mpk")
-    assert kind in ("mpk", "triton", "flashinfer") and not (kind == "flashinfer" and CC != 100), kind
+    kind = want or ("triton" if requests >= 32 else "mpk")
+    assert kind in ("mpk", "triton"), kind
     if kind != "mpk":
         try:
             __import__(kind + "_moe")
@@ -97,7 +98,6 @@ def moe_kind(requests: int) -> str:
                 raise
             print(f"{kind}_moe not importable ({e}): the routed experts as the MPK kernel", flush=True)
             kind = "mpk"
-    assert not (CC == 100 and kind == "mpk" and T != 8), "Blackwell's native experts (gpt_oss_moe_experts): 8 token rows"
     return kind
 
 
@@ -135,35 +135,29 @@ class Model:
             "topk_w": zeros(T, TOPK, dtype=torch.float32), "routing": zeros(E, T, dtype=torch.int32),
             "eo": zeros(T, TOPK, H), "act": zeros(E, T, I, dtype=torch.float16),
         }
+        # trtllm attention: q with RoPE and the requests' lengths for the outside attention kernel, the full layers'
+        # tensors only (layer_tensors: the other kernels' graphs keep their inputs, so their plans' node ids)
+        self.full_attn = full_attention(self)
+        self.trt = ({"q_rope": zeros(T, QH * D), "seq_lens": zeros(R, dtype=torch.int32)}
+                    if self.full_attn == "trtllm" else {})
         self.x = [zeros(T, H), zeros(T, H)]                          # the residual stream, ping-pong between layers
         self.x_embed = zeros(T, H)                                   # layer 0's input: the head writes the next token's row
         self.layers = []
         self.done = zeros(T, H // 64, dtype=torch.int32)             # the experts' combine counters
         pack = lambda w, s, rows, glu: sm90_moe_split_weights(sm90_moe_pack(w.cuda(), s.cuda(), rows, glu=glu), rows)
         self.moe_kind = moe_kind(requests)
-        self.native = CC == 100 and self.moe_kind == "mpk"            # the experts inside the layer kernel
-        if self.native:
-            self.shared["z_q"] = zeros(T, NATIVE_PAD, dtype=torch.uint8)   # h2 as MXFP8 (gpt_oss_mxfp8_quant)
-        if self.moe_kind == "flashinfer":   # the gate writes FlashInfer's inputs: h2 in its padded rows (the columns past
-            from flashinfer_moe import H_PAD    # H stay zero), the top-k ids [T][TOPK] in routing's rows past E
-            # GPTOSS_FI_ACT=mxfp8: h2 as MXFP8 (SGLang's default activations on B200), else bf16 (vLLM's)
-            self.fi_mxfp8 = os.environ.get("GPTOSS_FI_ACT", "mxfp8") == "mxfp8"
-            # GPTOSS_FI_ROUTE=logits: the gate writes the router logits, FlashInfer's routing takes the top-k (SGLang's
-            # path; no top-k in the gate); "ids": the gate's top-k ids and weights (FlashInfer's routed entry)
-            self.fi_logits = os.environ.get("GPTOSS_FI_ROUTE", "logits") == "logits"
-            self.shared["h2"] = (zeros(T, H_PAD * 33 // 32, dtype=torch.uint8) if self.fi_mxfp8 else zeros(T, H_PAD))
+        # Blackwell (FlashInfer): the gate writes FlashInfer's inputs, h2 as MXFP8 in its padded rows (the columns past H
+        # stay zero) and the bf16 router logits at routing's start (FlashInfer's routing takes the top-k). FlashInfer
+        # runs unfinalized, and the next layer's first task (gpt_oss_moe_norm; the head's) computes its finalize, adds
+        # it to the residual stream (x_res, for the gate) and norms it: no combine or finalize kernel between the
+        # layers. moe_tab [L + 1, 4] int64: row j = the experts' outputs layer j's norm reads (row 0 none;
+        # FlashinferMoe.set_fold).
+        self.fold = self.moe_kind == "flashinfer"
+        if self.fold:
+            from flashinfer_moe import H_PAD
+            self.shared["h2"] = zeros(T, H_PAD * 33 // 32, dtype=torch.uint8)
             self.shared["routing"] = zeros(E + TOPK, T, dtype=torch.int32)
-        # FlashInfer's experts leave their sum in moe_y; the next layer's first norm (or the head's) adds it to the
-        # x1 before (x_res: the residual stream, for the gate), no combine kernel between them. Layer 0 adds y0 (zeros).
-        self.fused_residual = self.moe_kind == "flashinfer"
-        if self.fused_residual:
             self.shared.update({"moe_y": zeros(T, H), "x_res": zeros(T, H)})
-            self.y0 = zeros(T, H)
-        # GPTOSS_MOE_FOLD=1 (Blackwell, FlashInfer from logits): FlashInfer runs unfinalized and the next layer's first
-        # task (gpt_oss_moe_norm) computes its finalize, the residual add and the norm: one kernel less a layer. moe_tab
-        # [L + 1, 4] int64: row j = the experts' outputs layer j's norm reads (row 0 none; FlashinferMoe.set_fold)
-        self.moe_fold = (self.fused_residual and self.fi_logits and os.environ.get("GPTOSS_MOE_FOLD", "0") == "1")
-        if self.moe_fold:
             self.moe_tab = zeros(self.L + 1, 4, dtype=torch.int64)
         ext = None if self.moe_kind == "mpk" else __import__(self.moe_kind + "_moe")
         self.texperts = []
@@ -177,10 +171,6 @@ class Model:
                 # the layer kernels' graphs attach every layer tensor (plans key on its node ids): placeholders
                 ex = {"w13": zeros(1, dtype=torch.uint8), "b13": zeros(1), "w2": zeros(1, dtype=torch.uint8),
                       "b2": zeros(1)}
-            elif self.native:
-                w13, s13, w2, s2, b13, b2 = (v.cuda() for v in prepare_gpt_oss_expert_bank(
-                    *(at(f"mlp.experts.{n}") for n in names), padded_width=NATIVE_PAD))
-                ex = {"w13": w13, "w13_scales": s13, "w2": w2, "w2_scales": s2, "b13": bf(b13), "b2": bf(b2)}
             else:
                 w13, s13, b13 = convert_expert_weight(at("mlp.experts.gate_up_proj_blocks"),
                                                       at("mlp.experts.gate_up_proj_scales"),
@@ -193,7 +183,7 @@ class Model:
             self.layers.append({
                 "ln1": bf(at("input_layernorm.weight")), "ln2": bf(at("post_attention_layernorm.weight")),
                 "w_qkv": pad_k(bf(shuffle_tensors(q, KVH, 0))), "b_qkv": bf(shuffle_tensors(qb, KVH, 0)),
-                "w_o": pad_rows(bf(at("self_attn.o_proj.weight"))), "b_o": bf(at("self_attn.o_proj.bias")),
+                "w_o": bf(at("self_attn.o_proj.weight")), "b_o": bf(at("self_attn.o_proj.bias")),
                 "sinks": bf(at("self_attn.sinks").view(KVH, QH // KVH)),
                 "w_router": bf(at("mlp.router.weight")), "b_router": bf(at("mlp.router.bias")),
                 **ex,
@@ -209,38 +199,38 @@ class Model:
         self.embed = bf(sd["model.embed_tokens.weight"])
         self.head = {"norm": bf(sd["model.norm.weight"]), "lm_head": bf(sd["lm_head.weight"]),
                      "h": zeros(T, H), "logits": zeros(T, self.V, dtype=torch.float32)}
-        self.moe = (ext.TritonMoe(R, E, TOPK, self.limit) if self.moe_kind == "triton" else
-                    ext.FlashinferMoe(R, E, TOPK, H, self.limit, self.shared["moe_y"], self.fi_logits)
-                    if self.moe_kind == "flashinfer" else
-                    None if self.native else Sm90MoeSplit(T, H, I, E, TOPK, self.shared["h2"], self.shared["act"], R))
-        if self.moe_fold:
+        if self.fold:
             assert ext.H_PAD == FI_GEMM2_WIDTH
-            self.moe.set_fold(self.moe_tab)
+        self.moe = (ext.TritonMoe(R, E, TOPK, self.limit) if self.moe_kind == "triton" else
+                    ext.FlashinferMoe(R, E, TOPK, H, self.limit, self.shared["moe_y"], self.moe_tab)
+                    if self.moe_kind == "flashinfer" else
+                    Sm90MoeSplit(T, H, I, E, TOPK, self.shared["h2"], self.shared["act"], R))
+        self.attn = None
+        if self.full_attn == "trtllm":
+            from trtllm_attn import TrtllmAttention
+            self.attn = TrtllmAttention(R, QH, KVH, D, PAGE, max_seq)
+            # not in self.layers (every layer graph's inputs: the plans' node ids)
+            self.sinks_f32 = [TrtllmAttention.sinks_of(layer["sinks"]) for layer in self.layers]
 
     def layer_tensors(self, i: int) -> dict:
         """Layer i's tensors by graph name: its weights and cache, the shared buffers, its residual in and out."""
-        ring = {"kv_indices": self.kv_indices_ring} if self.types[i] == "sliding_attention" else {}
+        ring = {"kv_indices": self.kv_indices_ring} if self.types[i] == "sliding_attention" else self.trt
         t = {**self.shared, **self.layers[i], **ring, "x_in": self.x_embed if i == 0 else self.x[i % 2],
              "x_out": self.x[(i + 1) % 2]}
-        if self.fused_residual:   # x_in: the previous layer's x1 (its experts in y_in); the gate's x1 is x_out
-            # fold: the experts' table row in y_in's place (the same graph inputs in the same order: the plans' node ids)
-            y_in = ({"moe_tab": self.moe_tab[i]} if self.moe_fold else
-                    {"y_in": self.y0 if i == 0 else self.shared["moe_y"]})
-            t.update({**y_in, "x1": self.x[(i + 1) % 2]})
+        if self.fold:   # x_in: the previous layer's x1 (its experts: moe_tab's row i); the gate's x1 is x_out
+            t.update({"moe_tab": self.moe_tab[i], "x1": self.x[(i + 1) % 2]})
         return t
 
     def residual_in(self, i: int) -> torch.Tensor:
-        """Layer i's input residual stream [T, H] (L: the head's), as the kernels compute it (a copy when fused)."""
+        """Layer i's input residual stream [T, H] (L: the head's), as the kernels compute it (a copy when folded)."""
         x = self.x_embed if i == 0 else self.x[i % 2]
-        if not self.fused_residual or i == 0:
+        if not self.fold or i == 0:
             return x.clone()
         return (x.float() + self.moe_y_of(i - 1).float()).to(x.dtype)
 
     def moe_y_of(self, i: int) -> torch.Tensor:
-        """Layer i's experts' sum [T, H] bf16 after it ran (rows past R zero); fold: FlashInfer's finalize of its
-        unfinalized outputs (FlashinferMoe.y_of), else moe_y (the last layer's)."""
-        if not self.moe_fold:
-            return self.shared["moe_y"]
+        """Layer i's experts' sum [T, H] bf16 after it ran (rows past R zero): FlashInfer's finalize of its
+        unfinalized outputs (FlashinferMoe.y_of)."""
         y = torch.zeros_like(self.shared["moe_y"])
         y[:self.R] = self.moe.y_of(self.moe.keep[i])
         return y
@@ -249,7 +239,7 @@ class Model:
         """The last layer's experts of the first R requests [R, TOPK], ascending, as the gate left them (ranks, or the
         logits' top-k when FlashInfer takes it)."""
         rt = self.shared["routing"]
-        if getattr(self, "fi_logits", False):
+        if self.fold:
             T = rt.shape[1]
             lg = rt.reshape(-1).view(torch.bfloat16)[:T * self.E].view(T, self.E)[:R].float()
             return lg.topk(self.TOPK, -1).indices.sort(-1).values
@@ -257,14 +247,13 @@ class Model:
 
     def x1_of(self, i: int) -> torch.Tensor:
         """Layer i's x1 (x_in + attention) after it ran."""
-        return self.x[(i + 1) % 2] if self.fused_residual else self.shared["x1"]
+        return self.x[(i + 1) % 2] if self.fold else self.shared["x1"]
 
     def head_tensors(self, prompt: torch.Tensor, gen: torch.Tensor) -> dict:
         """The final norm and lm_head, then the next step's tokens (prompt [R, P] i64; gen [R, NEW] i64: the generated
         tokens)."""
-        y_in = {"moe_tab": self.moe_tab[self.L]} if getattr(self, "moe_fold", False) else {"y_in": self.shared.get("moe_y")}
-        fused = {**y_in, "x_res": self.shared["x_res"]} if self.fused_residual else {}
-        return {"x": self.x[self.L % 2], **self.head, **fused, "embed": self.embed, "prompt": prompt, "gen": gen,
+        fold = {"moe_tab": self.moe_tab[self.L], "x_res": self.shared["x_res"]} if self.fold else {}
+        return {"x": self.x[self.L % 2], **self.head, **fold, "embed": self.embed, "prompt": prompt, "gen": gen,
                 "x_embed": self.x_embed, "kv_indptr": self.shared["kv_indptr"],
                 "last_page_len": self.shared["last_page_len"], "kv_indices": self.shared["kv_indices"],
                 "kv_indices_ring": self.kv_indices_ring}
@@ -281,15 +270,18 @@ class Model:
 
 
 def launch_layer(m: Model, kernel, inst: int, i: int):
-    """Layer i: its kernel (instance inst), then its routed experts and combine (moe_kind): x_out = x1 + the experts'
-    sum (Blackwell's native experts: inside the kernel)."""
-    if i == 0 and getattr(m, "moe_fold", False):   # a capture's table restore, before the step's first kernel
+    """Layer i: its kernel (instance inst), then its routed experts (moe_kind; Hopper's add x1 into x_out). A pair of
+    kernels and instances (trtllm attention's full layers): the first, FlashInfer's attention, then the second."""
+    if i == 0 and m.fold:   # a capture's table restore, before the step's first kernel
         m.moe.begin_step()
-    kernel.launch_instances(inst, 1)
     t, L = m.shared, m.layers[i]
-    if m.native:
-        return
-    if m.moe_kind == "flashinfer":   # the experts' sum into moe_y (the next norm adds x1); fold: into moe_tab row i + 1
+    if isinstance(kernel, tuple):
+        kernel[0].launch_instances(inst[0], 1)
+        m.attn.launch(m.trt["q_rope"], L["k_cache"], L["v_cache"], m.trt["seq_lens"], t["attn"], m.sinks_f32[i])
+        kernel[1].launch_instances(inst[1], 1)
+    else:
+        kernel.launch_instances(inst, 1)
+    if m.moe_kind == "flashinfer":   # unfinalized: the next layer's norm reads its outputs (moe_tab row i + 1)
         m.moe.launch(t["routing"], t["topk_w"], t["h2"], m.texperts[i], layer=i)
         return
     if m.moe_kind != "mpk":
@@ -299,31 +291,68 @@ def launch_layer(m: Model, kernel, inst: int, i: int):
                  m.x[(i + 1) % 2], m.done, m.limit, 1.702)
 
 
+def compile_layers(m: Model, out_dir: str, plans: str):
+    """The layer kernels and one instance a layer: (kernel_of, inst, kernels). kernel_of[i] / inst[i]: layer i's kernel
+    and instance, or a pair of each (trtllm attention's full layers: launch_layer runs FlashInfer's attention between)."""
+    kinds = layer_kinds(m)
+    k = {kind: compile_kernel(kind, build, t, out_dir, plans and plan_path(m, plans, kind))
+         for kind, (build, t) in kinds.items()}
+    sliding = [i for i in range(m.L) if m.types[i] == "sliding_attention"]
+    k_sl = k["sliding"]
+    k_fu = (k["full_a"], k["full_b"]) if m.full_attn == "trtllm" else k["full"]
+    kernel_of, inst = {}, {}
+    for i in range(m.L):
+        kernel_of[i] = k_sl if i in sliding else k_fu
+        t_i = m.layer_tensors(i)
+        inst[i] = (tuple(k.add_instance(t_i) for k in kernel_of[i]) if isinstance(kernel_of[i], tuple) else
+                   kernel_of[i].add_instance(t_i))
+    return kernel_of, inst, [k_sl, *(k_fu if isinstance(k_fu, tuple) else (k_fu,))]
+
+
+def layer_kinds(m: Model) -> dict:
+    """The layer kernels by kind (their plan files' kind): {kind: (build, tensors)}. "sliding", and "full" or (trtllm
+    attention) "full_a" and "full_b"."""
+    sliding = [i for i in range(m.L) if m.types[i] == "sliding_attention"]
+    full = [i for i in range(m.L) if i not in sliding]
+    t_sl, t_fu = m.layer_tensors(sliding[0]), m.layer_tensors(full[0])
+    kinds = {"sliding": (lambda mpk, t: build_layer(m, mpk, t, m.window), t_sl)}
+    if m.full_attn == "trtllm":
+        for part in "ab":
+            kinds[f"full_{part}"] = (lambda mpk, t, part=part: build_layer(m, mpk, t, 0, part), t_fu)
+    else:
+        kinds["full"] = (lambda mpk, t: build_layer(m, mpk, t, 0), t_fu)
+    return kinds
+
+
 def warm_moe(m: Model):
     """FlashInfer's MoE: its tactic search for this batch once before the steps (as vLLM's warm-up; the layers share
-    their shapes)."""
+    their shapes), the batch's pinned tactic (FI_PINS), and the fold's contract on this GPU and FlashInfer build."""
     if m.moe_kind == "flashinfer":
         t = m.shared
-        m.moe.autotune(t["routing"], t["topk_w"], t["h2"], m.texperts[0])
-        if getattr(m, "moe_fold", False):   # the unfinalized outputs' contract on this GPU and FlashInfer build
-            print(f"fold: FlashInfer finalize contract {m.moe.verify_fold(t['routing'], t['topk_w'], t['h2'], m.texperts[0])}",
-                  flush=True)
+        m.moe.autotune(t["routing"], t["topk_w"], t["h2"], m.texperts[0], pins=FI_PINS)
+        print(f"fold: FlashInfer finalize contract {m.moe.verify_fold(t['routing'], t['topk_w'], t['h2'], m.texperts[0])}",
+              flush=True)
 
 
-def build_layer(m: Model, mpk: StaticMegakernel, t: dict, window: int):
+def build_layer(m: Model, mpk: StaticMegakernel, t: dict, window: int, part: str = None):
     """The decoder layer up to the router: x1 = x_in + attn(norm(x_in)), h2 = norm(x1) and its routing (launch_layer
-    then runs the experts)."""
+    then runs the experts). part (trtllm attention's full layers): "a" up to the attention's inputs (q, the appended
+    K / V, seq_lens), "b" from its output."""
     mpk.max_bufs = max(getattr(mpk, "max_bufs", 0), 64)   # the layer's tensors (Hopper's default; Blackwell's is 24)
     A = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in t.items()}
-    fused = "y_in" in A or "moe_tab" in A   # the residual stream x_in + y_in, into x_res (Model.fused_residual)
-    first_norm(m, mpk, A, A["x_in"], A["ln1"])
-    mpk.gemm_tile_layer(input=A["h"], weight=A["w_qkv"], output=A["qkv32"], combine="store",
-                        store_parts=A["qkv32"].dim(0) // A["h"].dim(0), min_parts=min_kparts("qkv"))
+    fold = "moe_tab" in A   # the residual stream x_in + the previous experts, into x_res (Model.fold)
+    if part != "b":
+        first_norm(m, mpk, A, A["x_in"], A["ln1"])
+        mpk.gemm_tile_layer(input=A["h"], weight=A["w_qkv"], output=A["qkv32"], combine="store",
+                            store_parts=A["qkv32"].dim(0) // A["h"].dim(0), min_parts=min_kparts("qkv"))
     qkv_bias = dict(qkv_bias=A["b_qkv"], qkv_staged=A["qkv"])   # the attention tasks add the bias (no bias node)
-    if mpk.target_cc == 100 and os.environ.get("GPTOSS_ATTN") == "sm100":   # A / B: MPK's Blackwell paged attention
-        mpk.sm100_attention_layer(A["qkv32"], A["k_cache"], A["v_cache"], A["cos"], A["sin"], A["qo_indptr"],
-                                  A["kv_indptr"], A["kv_indices"], A["last_page_len"], A["attn"], num_q_heads=m.QH,
-                                  window=window, sinks=A["sinks"], **qkv_bias)
+    if part == "a":
+        mpk.gpt_oss_rope_append_layer(A["qkv32"], A["b_qkv"], A["cos"], A["sin"], A["qo_indptr"], A["kv_indptr"],
+                                      A["kv_indices"], A["last_page_len"], A["k_cache"], A["v_cache"], A["seq_lens"],
+                                      A["q_rope"], num_q_heads=m.QH)
+        return
+    if part == "b":
+        pass   # the attention output: FlashInfer's, in attn
     elif window and mpk.target_cc == 100:   # Blackwell: the window's tiles (the ring's pages) in one split a request,
         mpk.sm90_attention_split_layer(A["qkv32"], A["k_cache"], A["v_cache"], A["cos"], A["sin"], A["qo_indptr"],
                                        A["kv_indptr"], A["kv_indices"], A["last_page_len"], A["attn_parts"],
@@ -333,6 +362,11 @@ def build_layer(m: Model, mpk: StaticMegakernel, t: dict, window: int):
         mpk.sm90_attention_layer(A["qkv32"], A["k_cache"], A["v_cache"], A["cos"], A["sin"], A["qo_indptr"],
                                  A["kv_indptr"], A["kv_indices"], A["last_page_len"], A["attn"], num_q_heads=m.QH,
                                  window=window, sinks=A["sinks"], **qkv_bias)
+    elif mpk.target_cc == 100:   # full attention (full_attention "direct"): a unit a request and head group, no merge
+        mpk.sm90_attention_split_layer(A["qkv32"], A["k_cache"], A["v_cache"], A["cos"], A["sin"], A["qo_indptr"],
+                                       A["kv_indptr"], A["kv_indices"], A["last_page_len"], A["attn_parts"],
+                                       num_q_heads=m.QH, qkv_bias=A["b_qkv"], output=A["attn"], sinks=A["sinks"],
+                                       full_direct=True)
     else:        # full attention: the KV split over the SMs (a few splits a request and KV head), then their merge (with the sinks)
         mpk.sm90_attention_split_layer(A["qkv32"], A["k_cache"], A["v_cache"], A["cos"], A["sin"], A["qo_indptr"],
                                        A["kv_indptr"], A["kv_indices"], A["last_page_len"], A["attn_parts"],
@@ -340,28 +374,19 @@ def build_layer(m: Model, mpk: StaticMegakernel, t: dict, window: int):
         mpk.sm90_attention_merge_layer(A["attn_parts"], A["qo_indptr"], A["attn"], num_q_heads=m.QH, sinks=A["sinks"])
     mpk.gemm_tile_layer(input=A["attn"], weight=A["w_o"], output=A["o32"], combine="store",
                         store_parts=A["o32"].dim(0) // A["h"].dim(0), min_parts=min_kparts("o"))
-    mpk.sm90_gate_layer(A["o32"], A["b_o"], A["x_res"] if fused else A["x_in"], A["ln2"], A["w_router"],
+    mpk.sm90_gate_layer(A["o32"], A["b_o"], A["x_res"] if fold else A["x_in"], A["ln2"], A["w_router"],
                         A["b_router"], A["num_tokens"], A["x1"], A["h2"], A["topk_w"], A["routing"], eps=m.eps,   # router splits: the plan's
-                        topk_ids=getattr(m, "moe_kind", "") == "flashinfer" and not getattr(m, "fi_logits", False),
-                        logits_only=getattr(m, "fi_logits", False),
-                        h_mxfp8=A["h2"].dim(1) * 32 // 33 if A["h2"].dtype == uint8 else 0)
-    if "z_q" in A:   # Blackwell's native experts in the layer kernel: h2 as MXFP8, then x_out = x1 + the experts
-        mpk.gpt_oss_mxfp8_quant_layer(A["h2"], A["z_q"])
-        mpk.gpt_oss_moe_experts_layer(A["z_q"], A["routing"], A["topk_w"], A["x1"], A["w13"], A["w13_scales"], A["w2"],
-                                      A["w2_scales"], A["b13"], A["b2"], A["x_out"])
-    if os.environ.get("STATIC_L2_PREFETCH_MB"):   # the QKV weight's first MB into L2 at the start (as the GLM demos)
-        mpk.l2_prefetch_weights(float(os.environ["STATIC_L2_PREFETCH_MB"]))
+                        logits_only=fold, h_mxfp8=A["h2"].dim(1) * 32 // 33 if fold else 0)
 
 
 def first_norm(m: Model, mpk: StaticMegakernel, A: dict, x, weight):
-    """A kernel's first node: h = norm(x), with the previous layer's experts added first when fused (x_res = x + y):
-    y read from y_in, or (fold, moe_tab) FlashInfer's finalize computed in the task (gpt_oss_moe_norm)."""
+    """A kernel's first node: h = norm(x); folded (moe_tab), the previous layer's experts added first (x_res = x + y),
+    y FlashInfer's finalize computed in the task (gpt_oss_moe_norm)."""
     if "moe_tab" in A:
         mpk.gpt_oss_moe_norm_layer(x, A["moe_tab"], weight, A["h"], A["x_res"], m.eps, top_k=m.TOPK,
                                    gemm2_width=FI_GEMM2_WIDTH)
     else:
-        mpk.sm90_rmsnorm_layer(x, weight, A["h"], m.eps,
-                               **(dict(add=A["y_in"], sum_out=A["x_res"]) if "y_in" in A else {}))
+        mpk.sm90_rmsnorm_layer(x, weight, A["h"], m.eps)
 
 
 def build_head(m: Model, mpk: StaticMegakernel, t: dict):
@@ -376,10 +401,8 @@ def build_head(m: Model, mpk: StaticMegakernel, t: dict):
 
 
 def plan_path(m: Model, plans: str, kind: str) -> str:
-    """The plan file of a kernel: one per graph (layer kind, expert count, requests, token rows past 8, the native
-    experts' layers: their own graph)."""
-    native = "_native" if getattr(m, "native", False) else ""
-    return os.path.join(plans, f"{kind}_e{m.E}_r{m.R}" + (f"_t{T}" if T != 8 else "") + native + ".json")
+    """The plan file of a kernel: one per graph (layer kind, expert count, requests, token rows past 8)."""
+    return os.path.join(plans, f"{kind}_e{m.E}_r{m.R}" + (f"_t{T}" if T != 8 else "") + ".json")
 
 
 def load_plan(mpk, path: str):
@@ -527,23 +550,17 @@ def main():
     assert P + NEW <= m.max_seq
     print(f"weights loaded and converted in {time.time() - t0:.0f} s", flush=True)
     # the kernels, and one instance per layer (layer i: instance inst[i] of kernel kind[i])
-    sliding = [i for i in range(m.L) if m.types[i] == "sliding_attention"]
-    full = [i for i in range(m.L) if m.types[i] != "sliding_attention"]
     gen = torch.zeros(R, NEW, dtype=torch.long, device="cuda")
     prompt_t = torch.tensor(prompts, dtype=torch.long, device="cuda")
-    kinds = {"sliding": (lambda mpk, t: build_layer(m, mpk, t, m.window), m.layer_tensors(sliding[0])),
-             "full": (lambda mpk, t: build_layer(m, mpk, t, 0), m.layer_tensors(full[0])),
-             "head": (lambda mpk, t: build_head(m, mpk, t), m.head_tensors(prompt_t, gen))}
+    kinds = {**layer_kinds(m), "head": (lambda mpk, t: build_head(m, mpk, t), m.head_tensors(prompt_t, gen))}
     if args.tune:
         tune(m, kinds, os.path.join(args.out, "tune"), args.plans, args.tune, args.rounds, args.time,
              prompt_t[torch.arange(R), (P // 2 + torch.arange(R)) % P])   # a distinct token a request
         return
-    k_sl, k_fu, k_hd = (compile_kernel(k, b, t, args.out, plan_path(m, args.plans, k)) for k, (b, t) in kinds.items())
-    kernel_of, inst = {}, {}
-    for i in range(m.L):
-        kernel_of[i] = k_sl if i in sliding else k_fu
-        inst[i] = kernel_of[i].add_instance(m.layer_tensors(i))
+    kernel_of, inst, kernels = compile_layers(m, args.out, args.plans)
+    k_hd = compile_kernel("head", *kinds["head"], args.out, plan_path(m, args.plans, "head"))
     k_hd.add_instance(m.head_tensors(prompt_t, gen))
+    kernels.append(k_hd)
     warm_moe(m)
 
     def step():
@@ -602,7 +619,7 @@ def main():
             print(f"message {k}: {tok.decode(gens[-1])[:80]!r}", flush=True)
         if args.json:
             json.dump({"prompt_ids": [ids[k] for k in only], "gen": gens}, open(args.json, "w"))
-        for k in (k_sl, k_fu, k_hd):
+        for k in kernels:
             k.finalize()
         return
     total, per, dec = generate(2)
@@ -619,7 +636,7 @@ def main():
         json.dump({"prompt_ids": prompts if R > 1 else prompts[0], "prompt_len": P, "gen": out if R > 1 else out[0],
                    "text": text, "total_ms": total, "step_us_median": statistics.median(per) * 1e3,
                    "decode_us": dec * 1e3}, open(args.json, "w"))
-    for k in (k_sl, k_fu, k_hd):
+    for k in kernels:
         k.finalize()
 
 

@@ -282,14 +282,10 @@ public:
                                   std::vector<int> const &params);
   int register_hc_post_mix_sm100_task(threadblock::Graph const &bgraph,
                                       std::vector<int> const &params);
-  int register_sm100_static_attention_task(threadblock::Graph const &bgraph,
-                                           std::vector<int> const &params);
-  int register_gpt_oss_moe_experts_sm100_task(threadblock::Graph const &bgraph,
-                                              std::vector<int> const &params);
-  int register_gpt_oss_mxfp8_quant_sm100_task(threadblock::Graph const &bgraph,
-                                              std::vector<int> const &params);
   int register_gpt_oss_moe_norm_sm100_task(threadblock::Graph const &bgraph,
                                            std::vector<int> const &params);
+  int register_gpt_oss_rope_append_sm100_task(threadblock::Graph const &bgraph,
+                                              std::vector<int> const &params);
   // SM100 tasks end
   // Multi-GPU tasks
   int register_nvshmem_allgather_strided_put_task(

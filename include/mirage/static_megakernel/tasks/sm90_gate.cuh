@@ -29,8 +29,8 @@
 
 namespace static_mk {
 
-// PARAMS {H, E, TOPK, eps (fp32 bits)} (S: the grid's y, the compiler's
-// choice); BUF_SLOTS {o [T, H] fp32, o's bias
+// PARAMS {H, E, TOPK, eps (fp32 bits)[, HS (h as MXFP8), logits only]} (S:
+// the grid's y, the compiler's choice); BUF_SLOTS {o [T, H] fp32, o's bias
 // [H] bf16, x (the residual) [T, H] bf16, the norm's weight [H] bf16, the
 // router [E, H] bf16, its bias [E] bf16, the step's token count [1] i32, x1 [T,
 // H] bf16, h [T, H] f16, weights [T, TOPK] fp32, routing indices [E, T] i32};
@@ -60,21 +60,17 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
   constexpr int TOK = SELF::counter + 1;
   // o: [P][T][H] fp32, the K parts of o_proj ("store", its grid y), added here
   constexpr int P = Sm90First<IN...>::type::y;
-  // HS > 0: h in bf16, rows of HS columns (the columns past H left as they
-  // are: FlashInfer's padded MoE input); IDS: the top-k expert ids [T][TOPK]
-  // also at routing + E T (its rows past E); MX: h as MXFP8 instead (bf16(h)
-  // in e4m3, a UE8M0 scale per 32: values [T][HS] bytes, then the scales
-  // [T][HS / 32], FlashInfer's linear layout)
+  // MX (HS > 0): h as MXFP8, FlashInfer's padded MoE input (bf16(h) in e4m3,
+  // a UE8M0 scale per 32: values [T][HS] bytes, the columns past H left as
+  // they are, then the scales [T][HS / 32], FlashInfer's linear layout)
   constexpr int HS = param_or<PARAMS, 4, 0>();
-  constexpr bool IDS = param_or<PARAMS, 5, 0>() != 0;
-  constexpr bool MX = param_or<PARAMS, 6, 0>() != 0;
+  constexpr bool MX = HS > 0;
   // LG: the router's logits only, bf16(logit + bias) [T][E] at routing's
   // start (FlashInfer's MoE takes the top-k: its routing kernel), each split
   // its own experts' -- no top-k, no count between the splits
-  constexpr bool LG = param_or<PARAMS, 7, 0>() != 0;
+  constexpr bool LG = param_or<PARAMS, 5, 0>() != 0;
   static_assert(HS == 0 || (HS >= H && HS % 32 == 0 && H % 32 == 0),
                 "h's row length");
-  static_assert(!MX || HS > 0, "MXFP8 h: padded rows");
   // TPT tokens a task (grid x = T / TPT, the compiler's choice with the
   // logits only): one load of the router rows for them all
   constexpr int TPT = T / SELF::x;
@@ -136,8 +132,7 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
     uint4 const *res =
         buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 2>()) + (size_t)t * VEC;
     uint4 *x1 = buf_at<uint4>(g, slot_at<BUF_SLOTS, 7>()) + (size_t)t * VEC;
-    uint4 *hout = buf_at<uint4>(g, slot_at<BUF_SLOTS, 8>()) +
-                  (size_t)t * (HS > 0 ? HS / 8 : VEC);
+    uint4 *hout = buf_at<uint4>(g, slot_at<BUF_SLOTS, 8>()) + (size_t)t * VEC;
     // 1. x1 = bf16(o + bias + x), and the row as rounded
     float xr[Row::PER][8];
     float ss = 0.f;
@@ -188,7 +183,7 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
         }
         uint4 const q = f32_to_f16x8(xr[j]);
         if (split == 0 && !MX) {
-          hout[v] = HS > 0 ? f32_to_bf16x8(xr[j]) : q;
+          hout[v] = q;
         }
         hs[v] = q;
       }
@@ -306,15 +301,10 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
   if constexpr (S > 1) {
     // the token's last task to count takes its top-k (the others' logits in
     // L2 before their counts)
-    if (threadIdx.x == 0) { // one acq_rel count (as sm90_next_token): the
-                            // block's logits (the barrier above) before it,
-                            // the other splits' after it
-      unsigned old;
-      asm volatile("atom.acq_rel.gpu.global.add.u32 %0, [%1], 1;"
-                   : "=r"(old)
-                   : "l"(g.cnt + TOK + t)
-                   : "memory");
-      last_split = old == S - 1;
+    if (threadIdx.x == 0) {
+      __threadfence();
+      last_split = atomicAdd(g.cnt + TOK + t, 1u) == S - 1;
+      __threadfence();
     }
     __syncthreads();
     if (!last_split) {
@@ -381,9 +371,6 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
       }
       wk[k] = best;
       wsum += best;
-      if (IDS && lane == 0) {
-        routing[E * T + t * TOPK + k] = t < ntok ? who : 0;
-      }
 #pragma unroll
       for (int j = 0; j < EPL; j++) {
         rank[j] = who == 32 * j + lane ? k + 1 : rank[j];

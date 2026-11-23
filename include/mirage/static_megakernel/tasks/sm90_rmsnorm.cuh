@@ -21,10 +21,8 @@
 
 namespace static_mk {
 
-// PARAMS {H, eps (fp32 bits)[, 1: add]}; BUF_SLOTS {input [T, H] bf16, weight
-// [H] bf16, output [T, H] bf16}; with add: {input, add [T, H] bf16, weight,
-// output, sum [T, H] bf16}: the row is bf16(input + add) (fp32, rounded once),
-// written to sum (a residual stream: the previous layer's x1 and its experts)
+// PARAMS {H, eps (fp32 bits)}; BUF_SLOTS {input [T, H] bf16, weight [H] bf16,
+// output [T, H] bf16}
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -35,15 +33,14 @@ __device__ __forceinline__ void run_sm90_rmsnorm(Maps const &,
                                                  KernelLocals &,
                                                  StaticTask const &tk) {
   constexpr int H = PARAMS::v[0];
-  constexpr bool ADD = param_or<PARAMS, 2, 0>() != 0;
-  constexpr int A = ADD ? 1 : 0; // the slots after input shift by one
   using Row = Sm90Row<H>;
   __shared__ float part[SM90_WARPS];
   sm90_task_begin<IN...>(g);
-  size_t const row = (size_t)tk.x * Row::VEC;
-  uint4 const *x = buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 0>()) + row;
-  uint4 const *w = buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 1 + A>());
-  uint4 *out = buf_at<uint4>(g, slot_at<BUF_SLOTS, 2 + A>()) + row;
+  uint4 const *x =
+      buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 0>()) + (size_t)tk.x * Row::VEC;
+  uint4 const *w = buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 1>());
+  uint4 *out =
+      buf_at<uint4>(g, slot_at<BUF_SLOTS, 2>()) + (size_t)tk.x * Row::VEC;
   float xf[Row::PER][8];
   uint4 wv[Row::PER];
   float ss = 0.f;
@@ -52,18 +49,6 @@ __device__ __forceinline__ void run_sm90_rmsnorm(Maps const &,
     int const v = Row::vec(j);
     if (v < Row::VEC) {
       bf16x8_to_f32(x[v], xf[j]);
-      if constexpr (ADD) {
-        float a[8];
-        bf16x8_to_f32(
-            (buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 1>()) + row)[v], a);
-#pragma unroll
-        for (int i = 0; i < 8; i++) {
-          xf[j][i] += a[i];
-        }
-        uint4 const q = f32_to_bf16x8(xf[j]);
-        (buf_at<uint4>(g, slot_at<BUF_SLOTS, 4>()) + row)[v] = q;
-        bf16x8_to_f32(q, xf[j]);
-      }
       wv[j] = w[v];
 #pragma unroll
       for (int i = 0; i < 8; i++) {

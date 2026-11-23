@@ -304,11 +304,9 @@ enum TaskType {
   TASK_SM90_ATTENTION_MERGE = 534,
   TASK_SM90_GATE = 535,
   TASK_SM90_NEXT_TOKEN = 538,
-  // Native Blackwell paged attention and GPT-OSS MXFP4 expert tasks.
-  TASK_SM100_ATTENTION = 540,
-  TASK_GPT_OSS_MOE_EXPERTS_SM100 = 541,
-  TASK_GPT_OSS_MXFP8_QUANT_SM100 = 542,
+  // GPT-OSS Blackwell tasks.
   TASK_GPT_OSS_MOE_NORM_SM100 = 543,
+  TASK_GPT_OSS_ROPE_APPEND_SM100 = 544,
   TASK_STATIC_TASK_END = 549, // end placeholder, not a real task
 };
 

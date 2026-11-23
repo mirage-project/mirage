@@ -5528,12 +5528,10 @@ int TaskRegister::register_gemm_tile_sm100_task(
   // fixed-point add, 2 plain store, 3 plain store in bf16), K, N, polled (1:
   // the activation is its producer's 0xFF-prefilled bf16 buffer, polled into
   // the ring's stages)[, L (mode 1: a launch with every seq_lens <= L only
-  // counts the tasks)[, the weight's rows (mode 2: zero-padded past N, the
-  // rows past N not stored)]]} (static_megakernel/core.cuh Combine); the K
-  // split is the grid's y; its tensor maps are the node's slots. inputs:
-  // activation [T, K], weight [N, K]; output: [T, N] fp32 (mode 3: bf16).
-  assert(params.size() >= 4 && params.size() <= 6);
-  assert(params.size() < 6 || (params[0] == 2 && params[5] > params[2]));
+  // counts the tasks)]} (static_megakernel/core.cuh Combine); the K split is
+  // the grid's y; its tensor maps are the node's slots. inputs: activation [T,
+  // K], weight [N, K]; output: [T, N] fp32 (mode 3: bf16).
+  assert(params.size() == 4 || params.size() == 5);
   assert(params[0] >= 0 && params[0] <= 3 &&
          (params[3] == 0 || params[3] == 1) &&
          (params[3] == 0 || params[0] == 0));
@@ -5543,8 +5541,7 @@ int TaskRegister::register_gemm_tile_sm100_task(
   assert(input_ops[1]->dtensor.num_dims == 2);
   assert(input_ops[1]->dtensor.dim[1] == input_ops[0]->dtensor.dim[1]);
   assert(input_ops[1]->dtensor.dim[1] == params[1]);
-  assert(input_ops[1]->dtensor.dim[0] ==
-         (params.size() == 6 ? params[5] : params[2]));
+  assert(input_ops[1]->dtensor.dim[0] == params[2]);
   return register_task_variant(TASK_GEMM_TILE_SM100,
                                static_build_only_task("gemm_tile", params));
 }
@@ -5686,14 +5683,10 @@ int TaskRegister::register_residual_add_sm100_task(
 
 int TaskRegister::register_sm90_rmsnorm_task(threadblock::Graph const &bgraph,
                                              std::vector<int> const &params) {
-  // params: {H, eps bits[, 1: add]}. inputs: x[, add], weight; outputs: y[,
-  // sum] (tasks/sm90_rmsnorm.cuh)
-  bool const add = params.size() == 3;
-  assert(params.size() == 2 || (add && params[2] == 1));
-  std::vector<tb::TBInputOp *> input_ops, output_ops;
-  static_split_ops(bgraph, add ? 3 : 2, add ? 2 : 1, input_ops, output_ops);
-  return register_task_variant(TASK_SM90_RMSNORM,
-                               static_build_only_task("sm90_rmsnorm", params));
+  // params: {H, eps bits}. inputs: x, weight; output: y
+  // (tasks/sm90_rmsnorm.cuh)
+  return register_static_task(
+      this, TASK_SM90_RMSNORM, "sm90_rmsnorm", bgraph, params, 2, 2);
 }
 
 int TaskRegister::register_sm90_attention_task(threadblock::Graph const &bgraph,
@@ -5738,10 +5731,9 @@ int TaskRegister::register_sm90_attention_merge_task(
 
 int TaskRegister::register_sm90_gate_task(threadblock::Graph const &bgraph,
                                           std::vector<int> const &params) {
-  // params: {H, E, TOPK, eps bits[, h's row length, top-k ids, MXFP8 h,
-  // logits only]} (router
-  // splits: the grid's y); four outputs (tasks/sm90_gate.cuh)
-  assert(params.size() == 4 || params.size() == 8);
+  // params: {H, E, TOPK, eps bits[, h's row length (MXFP8 h), logits only]}
+  // (router splits: the grid's y); four outputs (tasks/sm90_gate.cuh)
+  assert(params.size() == 4 || params.size() == 6);
   std::vector<tb::TBInputOp *> input_ops, output_ops;
   static_split_ops(
       bgraph, (int)bgraph.operators.size() - 4, 4, input_ops, output_ops);
@@ -5822,48 +5814,6 @@ int TaskRegister::register_scaled_moe_experts_sm100_task(
       static_build_only_task("scaled_moe_experts", params));
 }
 
-int TaskRegister::register_sm100_static_attention_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: {Q, KVH, D, max seq, page, window, has sink, has qkv bias,
-  // max tokens}; Blackwell paged attention adapter.
-  assert(params.size() == 9 && params[0] > 0 && params[1] > 0 &&
-         params[0] % params[1] == 0 && params[2] == 64 && params[8] > 0);
-  std::vector<tb::TBInputOp *> inputs, outputs;
-  static_split_ops(
-      bgraph, (int)bgraph.operators.size() - 1, 1, inputs, outputs);
-  assert(inputs.size() >= 9);
-  return register_task_variant(
-      TASK_SM100_ATTENTION, static_build_only_task("sm100_attention", params));
-}
-
-int TaskRegister::register_gpt_oss_moe_experts_sm100_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: {hidden=2880, padded intermediate=2944}.
-  assert(params.size() == 2 && params[0] == 2880 && params[1] == 2944);
-  std::vector<tb::TBInputOp *> input_ops, output_ops;
-  static_split_ops(bgraph, 10, 1, input_ops, output_ops);
-  return register_task_variant(
-      TASK_GPT_OSS_MOE_EXPERTS_SM100,
-      static_build_only_task("gpt_oss_moe_experts", params));
-}
-
-int TaskRegister::register_gpt_oss_mxfp8_quant_sm100_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: {L=2880, PAD=2944, fp16 flag}; output includes packed scale data.
-  assert(params.size() == 3 && params[0] == 2880 && params[1] == 2944 &&
-         (params[2] == 0 || params[2] == 1));
-  std::vector<tb::TBInputOp *> input_ops, output_ops;
-  static_split_ops(bgraph, 1, 1, input_ops, output_ops);
-  assert(input_ops[0]->dtensor.num_dims == 2 &&
-         input_ops[0]->dtensor.dim[1] == params[0]);
-  assert(output_ops[0]->dtensor.num_dims == 2 &&
-         output_ops[0]->dtensor.dim[0] == input_ops[0]->dtensor.dim[0] &&
-         output_ops[0]->dtensor.dim[1] == params[1]);
-  return register_task_variant(
-      TASK_GPT_OSS_MXFP8_QUANT_SM100,
-      static_build_only_task("gpt_oss_mxfp8_quant", params));
-}
-
 int TaskRegister::register_gpt_oss_moe_norm_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params: {H, eps bits, TOPK, HP}. inputs: x, table, weight; outputs: y, sum
@@ -5877,6 +5827,21 @@ int TaskRegister::register_gpt_oss_moe_norm_sm100_task(
   return register_task_variant(
       TASK_GPT_OSS_MOE_NORM_SM100,
       static_build_only_task("gpt_oss_moe_norm", params));
+}
+
+int TaskRegister::register_gpt_oss_rope_append_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {Q, KVH, D, max seq, page, R}; inputs qkv, bias, cos, sin,
+  // qo_indptr, kv_indptr, kv_indices, last_page_len, k cache, v cache,
+  // seq_lens; output q (tasks/gpt_oss_rope_append.cuh)
+  assert(params.size() == 6 && params[2] == 64 && params[0] == 8 * params[1]);
+  return register_static_task(this,
+                              TASK_GPT_OSS_ROPE_APPEND_SM100,
+                              "gpt_oss_rope_append",
+                              bgraph,
+                              params,
+                              (int)bgraph.operators.size() - 1,
+                              6);
 }
 
 int TaskRegister::register_dsa_q_norm_quant_sm100_task(

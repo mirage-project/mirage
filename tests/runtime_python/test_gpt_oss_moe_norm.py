@@ -13,8 +13,8 @@
 # limitations under the License.
 
 """gpt_oss_moe_norm (tasks/gpt_oss_moe_norm.cuh) bit for bit against the unfused path it replaces: FlashInfer's
-finalize writing the experts' sum, then sm90_rmsnorm's add (the residual stream and the norm), both in one static
-kernel. The inputs hit finalize's edges: -1 slots, rows past R, R = 0, products below fp32's normal range (where flush
+finalize writing the experts' sum, the residual add (bf16(x + y), fp32 rounded once), then sm90_rmsnorm of the sum
+(an sm90_rmsnorm node after the fused one, in the same static kernel). The inputs hit finalize's edges: -1 slots, rows past R, R = 0, products below fp32's normal range (where flush
 to zero acts), an inf. The task's code is plain CUDA (no tcgen05), so this runs on any GPU the static megakernel builds
 for.
 
@@ -250,13 +250,13 @@ def test_gpt_oss_moe_norm_matches_flashinfer_finalize_then_rmsnorm(tmp_path, fin
     y_ref = torch.zeros(T, H, dtype=torch.bfloat16, device=dev)
     table = torch.zeros(4, dtype=torch.int64, device=dev)
     bufs = {"x": x, "y_ref": y_ref, "table": table, "ln": ln}
-    for k in ("out_a", "sum_a", "out_b", "sum_b"):
+    for k in ("out_a", "out_b", "sum_b"):
         bufs[k] = torch.zeros(T, H, dtype=torch.bfloat16, device=dev)
     mpk = StaticMegakernel(num_gpus=1)
     A = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in bufs.items()}
     eps = 1e-5
-    mpk.sm90_rmsnorm_layer(A["x"], A["ln"], A["out_a"], eps, add=A["y_ref"], sum_out=A["sum_a"])
     mpk.gpt_oss_moe_norm_layer(A["x"], A["table"], A["ln"], A["out_b"], A["sum_b"], eps, top_k=TOPK, gemm2_width=HP)
+    mpk.sm90_rmsnorm_layer(A["sum_b"], A["ln"], A["out_a"], eps)   # the unfused norm of the fused sum
     paths, _ = compiler.compile_plan(mpk, plan_gen.round_robin_plan(mpk), str(tmp_path / "schedules"))
     fl = sm100_flags() if torch.cuda.get_device_capability()[0] == 10 else sm90_flags()
     sk = mpk.compile_static(paths, gpu_tensors=[bufs], out_dir=str(tmp_path / "build"), extra_flags=fl)
@@ -270,14 +270,16 @@ def test_gpt_oss_moe_norm_matches_flashinfer_finalize_then_rmsnorm(tmp_path, fin
             y_ref.zero_()
             assert finalize(g2.data_ptr(), idx.data_ptr(), w.data_ptr(), y_ref.data_ptr(), R, H, HP, TOPK) == 0
             table.copy_(torch.tensor([g2.data_ptr(), idx.data_ptr(), w.data_ptr(), R], dtype=torch.int64))
-            for k in ("out_a", "sum_a", "out_b", "sum_b"):
+            for k in ("out_a", "out_b", "sum_b"):
                 bufs[k].fill_(float("nan"))
             torch.cuda.synchronize()
             h.launch(timeout_s=30)
             torch.cuda.synchronize()
-            for a, b in (("sum_a", "sum_b"), ("out_a", "out_b")):
-                d = (bufs[a].view(torch.int16) != bufs[b].view(torch.int16)).sum().item()
-                assert d == 0, f"{c}: {b} differs from the unfused path's {a} in {d} elements"
+            # the unfused path: sum = bf16(x + finalize's y) (fp32, rounded once), then sm90_rmsnorm of it
+            sum_a = (x.float() + y_ref.float()).to(torch.bfloat16)
+            for name, a, b in (("sum", sum_a, bufs["sum_b"]), ("out", bufs["out_a"], bufs["out_b"])):
+                d = (a.view(torch.int16) != b.view(torch.int16)).sum().item()
+                assert d == 0, f"{c}: the fused {name} differs from the unfused path's in {d} elements"
             # the test's power: finalize's flush to zero is visible against an exact (no flush) emulation
             acc = torch.zeros(R, H, dtype=torch.float64, device=dev)
             for k in range(TOPK):

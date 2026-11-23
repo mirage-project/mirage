@@ -31,11 +31,7 @@ __device__ __forceinline__ TileJob make_bf16_tile(CUtensorMap const *wmap,
 template <int MODE>
 __device__ __forceinline__ void tile_epilogue(
     void *out, int N, int row0, int split, int row, float const *v) {
-  if (MODE == COMBINE_STORE) { // K part `split` at [split][T][N]; a padded
-                               // weight's rows past N: not stored
-    if (row0 + row >= N) {
-      return;
-    }
+  if (MODE == COMBINE_STORE) { // K part `split` at [split][T][N]
     for (int t = 0; t < T; t++) {
       reinterpret_cast<float *>(out)[((size_t)split * T + t) * N + row0 + row] =
           v[t];
@@ -285,13 +281,9 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
     }
   }
   constexpr int pieces = k_tiles / SELF::y; // K tiles of 128 per task
-  // WN: the weight's rows ("store" with a weight zero-padded past N to whole
-  // 128-row tiles; the rows past N are not stored)
-  constexpr int WN = param_or<PARAMS, 5, N>();
-  constexpr int ROWS = WN / SELF::x;
-  static_assert(ROWS * SELF::x == WN && (ROWS == 128 || ROWS == 64) &&
-                    (WN == N || (mode == COMBINE_STORE && WN > N)),
-                "128 or 64 weight rows per task (padded rows: \"store\" only)");
+  constexpr int ROWS = N / SELF::x;
+  static_assert(ROWS * SELF::x == N && (ROWS == 128 || ROWS == 64),
+                "128 or 64 weight rows per task");
   static_assert(mode == COMBINE_SLOTS || mode == COMBINE_ADD ||
                     mode == COMBINE_STORE || mode == COMBINE_STORE_BF16,
                 "mode: Combine");

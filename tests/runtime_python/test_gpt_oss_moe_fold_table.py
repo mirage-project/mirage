@@ -62,10 +62,9 @@ def test_fold_table_eager_and_graph_replays(monkeypatch):
     import flashinfer_moe
 
     y = torch.zeros(8, H, dtype=torch.bfloat16, device="cuda")
-    moe = flashinfer_moe.FlashinferMoe(R, E, TOPK, H, 7.0, y, logits=True)
     table = torch.full((L + 1, 4), -7, dtype=torch.int64, device="cuda")
     table[0].zero_()
-    moe.set_fold(table)
+    moe = flashinfer_moe.FlashinferMoe(R, E, TOPK, H, 7.0, y, table)
     routing = torch.zeros(E + TOPK, 8, dtype=torch.int32, device="cuda")
     h2 = torch.zeros(8, 3072 * 33 // 32, dtype=torch.uint8, device="cuda")
 

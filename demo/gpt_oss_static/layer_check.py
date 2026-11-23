@@ -88,16 +88,9 @@ def main():
     prompt_t = torch.tensor([i[:S + 1] for i in ids], device="cuda")
     gen = torch.zeros(R, 1, dtype=torch.long, device="cuda")
     sliding = [i for i in range(m.L) if m.types[i] == "sliding_attention"]
-    full = [i for i in range(m.L) if m.types[i] != "sliding_attention"]
-    kinds = {"sliding": (lambda mpk, t: g.build_layer(m, mpk, t, m.window), m.layer_tensors(sliding[0])),
-             "full": (lambda mpk, t: g.build_layer(m, mpk, t, 0), m.layer_tensors(full[0])),
-             "head": (lambda mpk, t: g.build_head(m, mpk, t), m.head_tensors(prompt_t, gen))}
-    k_sl, k_fu, k_hd = (g.compile_kernel(k, b, t, args.out, args.plans and g.plan_path(m, args.plans, k))
-                        for k, (b, t) in kinds.items())
-    kernel_of, inst = {}, {}
-    for i in range(m.L):
-        kernel_of[i] = k_sl if i in sliding else k_fu
-        inst[i] = kernel_of[i].add_instance(m.layer_tensors(i))
+    kernel_of, inst, kernels = g.compile_layers(m, args.out, args.plans)   # the demo's layer kernels and instances
+    k_hd = g.compile_kernel("head", lambda mpk, t: g.build_head(m, mpk, t), m.head_tensors(prompt_t, gen), args.out,
+                            args.plans and g.plan_path(m, args.plans, "head"))
     k_hd.add_instance(m.head_tensors(prompt_t, gen))
     m.set_position(0)
     m.x_embed[:R].copy_(m.embed[prompt_t[:, 0]])
@@ -180,7 +173,7 @@ def main():
         print(f"{i:>3} {'slide' if i in sliding else 'full':>5} | {fmt(a_s):>19} {fmt(a_h):>19} | {fmt(m_s):>19} "
               f"{fmt(m_h):>19} | static {R - flips.sum().item()}/{R} hf {same}/{R}"
               + "".join(f" (token {t}: gap {gap[t].item():.1e})" for t in flips.nonzero()[:, 0].tolist()), flush=True)
-    for k in (k_sl, k_fu, k_hd):
+    for k in (*kernels, k_hd):
         k.finalize()
 
 

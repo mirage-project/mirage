@@ -142,14 +142,14 @@ def _gpt_oss_demo():
     return module, demo
 
 
-def _build_gpt_oss_static(kind, cc=90, native=False, fold=False, build=True):
-    """One GPT-OSS layer (kind: sliding or full attention) of the static
-    megakernel, its tensors zeros, built with the demo's serving flags: for
+def _build_gpt_oss_static(kind, cc=90):
+    """One GPT-OSS layer kernel of the static megakernel, its tensors zeros,
+    built with the demo's serving flags: kind sliding or full (sm_90a: split +
+    merge; sm_100a: the direct full attention), or on sm_100a full_a / full_b
+    (the full layer's halves around FlashInfer's trtllm-gen attention); for
     sm_90a (20B, the shipped H100 plan on 132 SMs, else round robin) or sm_100a
-    (148 SMs, round robin; native: 120B with Blackwell's MXFP8 x MXFP4 experts
-    in the layer kernel). fold: FlashInfer's finalize in the first norm
-    (GPTOSS_MOE_FOLD: gpt_oss_moe_norm reading moe_tab). build=False: the
-    graph's nodes [(graph_idx, name, grid)] only."""
+    (148 SMs, round robin; FlashInfer's MoE inputs from the gate and its
+    finalize in the first norm, gpt_oss_moe_norm reading moe_tab)."""
     from mirage.mpk import compiler, plan_gen
     from mirage.mpk.static_megakernel import (StaticMegakernel,
                                               sm90_attention_parts_size)
@@ -157,7 +157,7 @@ def _build_gpt_oss_static(kind, cc=90, native=False, fold=False, build=True):
     g, demo = _gpt_oss_demo()
     g.CC = cc
     nsm = 148 if cc == 100 else 132
-    H, I, E, TOPK, QH, KVH, D, MAX_SEQ = 2880, 2880, 128 if native else 32, 4, 64, 8, 64, 1024
+    H, I, E, TOPK, QH, KVH, D, MAX_SEQ = 2880, 2880, 32, 4, 64, 8, 64, 1024
     T, PAGE, R13, R2 = g.T, g.PAGE, 128, 64
     kt = (H + 127) // 128
 
@@ -191,39 +191,32 @@ def _build_gpt_oss_static(kind, cc=90, native=False, fold=False, build=True):
         "v_cache": z(MAX_SEQ // PAGE, PAGE, KVH, D),
         "x_in": z(T, H), "x_out": z(T, H),
     }
-    if native:
-        P = g.NATIVE_PAD
-        t.update({"z_q": z(T, P, dtype=torch.uint8),
-                  "w13": z(E, P // 64, P // 128, 8192, dtype=torch.uint8),
-                  "w13_scales": z(E, P // 64, P // 128, 512, dtype=torch.uint8),
-                  "w2": z(E, P // 128, P // 128, 8192, dtype=torch.uint8),
-                  "w2_scales": z(E, P // 128, P // 128, 512, dtype=torch.uint8),
-                  "b13": z(E, 2 * P), "b2": z(E, P)})
-    # sm100 without the native experts: FlashInfer's inputs from the gate (bf16
-    # h in padded rows, the top-k ids past routing's E rows)
-    fi = cc == 100 and not native
-    if fi:
-        y_in = {"moe_tab": z(4, dtype=torch.int64)} if fold else {"y_in": z(T, H)}
-        t.update({"h2": z(T, 3072 * 33 // 32, dtype=torch.uint8),   # MXFP8 h
+    # sm100: FlashInfer's inputs from the gate (MXFP8 h in padded rows, the
+    # bf16 router logits at routing's start), its finalize in the first norm
+    if cc == 100:
+        t.update({"h2": z(T, 3072 * 33 // 32, dtype=torch.uint8),
                   "routing": z(E + TOPK, T, dtype=torch.int32),
-                  **y_in, "x_res": z(T, H)})
+                  "moe_tab": z(4, dtype=torch.int64), "x_res": z(T, H)})
+        if kind in ("full_a", "full_b"):   # trtllm-gen attention's q and lengths
+            t.update({"q_rope": z(T, QH * D), "seq_lens": z(1, dtype=torch.int32)})
     m = type("Cfg", (), dict(eps=1e-5, QH=QH, KVH=KVH, E=E, TOPK=TOPK, limit=7.0,
-                             max_seq=MAX_SEQ, R=1,
-                             moe_kind="flashinfer" if fi else "mpk", fi_logits=fi))
+                             max_seq=MAX_SEQ, R=1))
     mpk = StaticMegakernel(num_gpus=1, num_sms=nsm, target_cc=cc)
-    g.build_layer(m, mpk, t, 128 if kind == "sliding" else 0)
-    if not build:
-        return [(n.graph_idx, n.name, tuple(n.grid)) for n in compiler.graph_nodes(mpk)]
+    g.build_layer(m, mpk, t, 128 if kind == "sliding" else 0,
+                  {"full_a": "a", "full_b": "b"}.get(kind))
     # the shipped H100 plan, else round robin with the router over 4 tasks a
     # token (the gate's changeable grid dim)
-    gate = next(n.graph_idx for n in compiler.graph_nodes(mpk)
-                if n.name == "sm90_gate")
-    grids = {gate: (T, 4, 1)}
+    nodes = compiler.graph_nodes(mpk)
+    grids = {n.graph_idx: (T, 4, 1) for n in nodes if n.name == "sm90_gate"}
     if cc == 100:   # QKV: 64-row tiles in its fewest K parts (the attention adds them); o_proj in 2 (the gate adds them)
-        gemms = [n for n in compiler.graph_nodes(mpk) if n.name == "gemm_tile"]
-        grids[gemms[0].graph_idx] = min((c for c in compiler.candidate_grids(gemms[0])
-                                         if c[0] == gemms[0].grid[0] * 2), key=lambda c: c[1])
-        grids[gemms[1].graph_idx] = (gemms[1].grid[0], 2, 1)
+        gemms = [n for n in nodes if n.name == "gemm_tile"]
+        qkv = gemms[0] if kind != "full_b" else None
+        o_proj = gemms[-1] if kind != "full_a" else None
+        if qkv is not None:
+            grids[qkv.graph_idx] = min((c for c in compiler.candidate_grids(qkv)
+                                        if c[0] == qkv.grid[0] * 2), key=lambda c: c[1])
+        if o_proj is not None:
+            grids[o_proj.graph_idx] = (o_proj.grid[0], 2, 1)
     plan = (cc == 90 and g.load_plan(mpk, g.plan_path(
         m, os.path.join(demo, "plans", "h100"), kind))) or \
         plan_gen.round_robin_plan(mpk, grids)
@@ -234,7 +227,7 @@ def _build_gpt_oss_static(kind, cc=90, native=False, fold=False, build=True):
                        extra_flags=g.flags(), build_only=True)
 
 
-def _build_gpt_oss_static_head(cc=90, fold=False, build=True):
+def _build_gpt_oss_static_head(cc=90):
     """The GPT-OSS static head (final norm, lm_head, the next step's tokens)
     at a small vocabulary, two requests, round-robin over the target's SMs,
     built for sm_90a or sm_100a."""
@@ -258,15 +251,12 @@ def _build_gpt_oss_static_head(cc=90, fold=False, build=True):
         "kv_indices": torch.zeros(R * MAX_SEQ // 64, dtype=torch.int32, device="cuda"),
         "kv_indices_ring": torch.zeros(R * MAX_SEQ // 64, dtype=torch.int32, device="cuda"),
     }
-    if cc == 100:   # FlashInfer's experts: the final norm adds their sum
-        y_in = {"moe_tab": z(4, dtype=torch.int64)} if fold else {"y_in": z(T, H)}
-        t.update({**y_in, "x_res": z(T, H)})
+    if cc == 100:   # FlashInfer's experts: the final norm finalizes and adds their sum
+        t.update({"moe_tab": z(4, dtype=torch.int64), "x_res": z(T, H)})
     m = type("Cfg", (), dict(eps=1e-5, max_seq=MAX_SEQ, RP=4, TOPK=4))
     mpk = StaticMegakernel(num_gpus=1, num_sms=148 if cc == 100 else 132,
                            target_cc=cc)
     g.build_head(m, mpk, t)
-    if not build:
-        return [(n.graph_idx, n.name, tuple(n.grid)) for n in compiler.graph_nodes(mpk)]
     out = os.path.join(os.environ.get("TMPDIR", "/tmp"),
                        f"mpk_cross_arch_gpt_oss_head_{cc}_{os.getpid()}")
     paths, _ = compiler.compile_plan(mpk, plan_gen.round_robin_plan(mpk),
@@ -285,25 +275,10 @@ STATIC_BUILDS = {
     "gpt_oss_static_head": _build_gpt_oss_static_head,
     "gpt_oss_static_sliding_sm100": lambda: _build_gpt_oss_static("sliding", 100),
     "gpt_oss_static_full_sm100": lambda: _build_gpt_oss_static("full", 100),
+    "gpt_oss_static_full_a_sm100": lambda: _build_gpt_oss_static("full_a", 100),
+    "gpt_oss_static_full_b_sm100": lambda: _build_gpt_oss_static("full_b", 100),
     "gpt_oss_static_head_sm100": lambda: _build_gpt_oss_static_head(100),
-    "gpt_oss_static_native_sm100": lambda: _build_gpt_oss_static(
-        "full", 100, native=True),
-    "gpt_oss_static_sliding_fold_sm100": lambda: _build_gpt_oss_static("sliding", 100, fold=True),
-    "gpt_oss_static_full_fold_sm100": lambda: _build_gpt_oss_static("full", 100, fold=True),
-    "gpt_oss_static_head_fold_sm100": lambda: _build_gpt_oss_static_head(100, fold=True),
 }
-
-
-def _fold_nodes_match():
-    """GPTOSS_MOE_FOLD's B200 graphs: the nodes of the unfused graphs (ids, grids: the plans' keys), only the first norm
-    another task type."""
-    for build in (lambda f: _build_gpt_oss_static("sliding", 100, fold=f, build=False),
-                  lambda f: _build_gpt_oss_static("full", 100, fold=f, build=False),
-                  lambda f: _build_gpt_oss_static_head(100, fold=f, build=False)):
-        base, fold = build(False), build(True)
-        assert [(i, g) for i, _, g in base] == [(i, g) for i, _, g in fold], (base, fold)
-        diff = [(a[1], b[1]) for a, b in zip(base, fold) if a[1] != b[1]]
-        assert diff == [("sm90_rmsnorm", "gpt_oss_moe_norm")], diff
 
 
 # Task variants accumulate in a process-wide registry and are all emitted into
@@ -320,14 +295,8 @@ def test_static_build(build):
     subprocess.run([sys.executable, __file__, build], check=True)
 
 
-def test_gpt_oss_fold_nodes_match():
-    subprocess.run([sys.executable, __file__, "gpt_oss_fold_nodes_match"], check=True)
-
-
 if __name__ == "__main__":
-    if sys.argv[1] == "gpt_oss_fold_nodes_match":
-        _fold_nodes_match()
-    elif sys.argv[1] in STATIC_BUILDS:
+    if sys.argv[1] in STATIC_BUILDS:
         STATIC_BUILDS[sys.argv[1]]()
     else:
         BUILDS[sys.argv[1]](int(sys.argv[2]))
