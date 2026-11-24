@@ -337,10 +337,20 @@ def hand_plan(mpk: StaticMegakernel, heads: int, cap: int, cmp_rows: int, sms: i
     # starts only after o_q, delaying the wo_b tasks behind it (TP2 reuse +4, full_r2 +5 to +6 us in SGLang): start so that
     # the mHC tasks end at the last SM instead, never on sparse_attn's SMs)
     hc = os.environ.get("HC_SMS", "")
+    # (11-24, DSV41_HC_FRONT=1, T > 8) T = 16: n + nwo = 160 wraps past the last SM, so the mixes and coefficients landed
+    # behind sparse_attn's tasks (in situ, reuse: the mixes start at 33.5 us, after o_q) and the wo_b tasks behind them ended
+    # 7 us late (49.0 against a median 41.6). Instead first on sparse_attn's SMs: their input, the streams, is there at the
+    # kernel's start, and those SMs wait about 20 us for q anyway
+    # Only one each (n >= the mHC tasks): with more (SWA, 16 sparse_attn SMs at T = 16: 3 each) sparse_attn's tasks started
+    # 16 us late (in situ, swa 40.5 -> 46.6 us; its q is there at ~16 us)
+    front = T > 8 and not hc and os.environ.get("DSV41_HC_FRONT", "0") != "0" and n >= len(mix) + len(coef)
+    if front:
+        for i, tk in enumerate(mix + coef):
+            lists[i].insert(0, tk)
     off = max(n, min(n + nwo, sms - len(mix) - len(coef))) if hc == "fit" else int(hc) if hc else n + nwo
-    for i, tk in enumerate(mix):
+    for i, tk in enumerate(mix if not front else []):
         lists[(off + i) % sms].append(tk)
-    for i, tk in enumerate(coef):
+    for i, tk in enumerate(coef if not front else []):
         lists[(off + len(mix) + i) % sms].append(tk)
     # (measurement: HCP_SMS = the first SM list of hc_post_combine's tasks, behind everything else on those SMs, instead of
     # their place in the round-robin of the nodes after sparse_attn)

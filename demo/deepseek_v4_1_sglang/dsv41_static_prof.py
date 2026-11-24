@@ -63,6 +63,8 @@ def _kernel(st, kind, rank=0):
     sb = int(st.prof_sb[0]) if own is not None else int(h._array(0, "start_barrier", np.int64)[0])
     start, end = t[:, lay["stamp_start"]], t[:, lay["stamp_end"]]
     on = start > 0
+    if not on.any():   # (11-24) a layer of another T that never ran (DSV41_STATIC_T: bs 16 runs only the T = 16 layers)
+        return None
     experts = -1
     if kind == "m" and "pairs" in st.bufs[0] and own is None:   # (shared: the pairs are the last MoE layer's)
         # (11-23) the layer's own T: its module's MoE demo (a layer of T > 8 is a class of a layer_module copy)
@@ -96,6 +98,13 @@ def maybe_sample(attns, moes, rank, meta=None):
         ks = [_kernel(st, "a", rank) for st in attns if getattr(st, "sk", None) is not None]
         ks += [_kernel(st, "m", rank) for st in moes if getattr(st, "sk", None) is not None
                and getattr(st, "fused", None) is None]   # (DSV41_STATIC_FUSE: the attention's kernel holds the MoE's nodes)
+        ks = [k for k in ks if k is not None]
+        # (11-24) only the last step's kernels: with DSV41_STATIC_T a layer of another T keeps the stamps of a launch long ago
+        # (a CUDA graph capture of another batch size); the step's kernels end within a few ms of each other
+        end1 = (lambda k: k[0][7]) if CTA else (lambda k: k[7])
+        if ks:
+            last = max(end1(k) for k in ks)
+            ks = [k for k in ks if last - end1(k) < 50_000_000]
         extra = {}
         if CTA:
             ks.sort(key=lambda k: (k[0][0], k[0][1]))

@@ -232,8 +232,17 @@ def hand_plan(mpk: StaticMegakernel, sms: int) -> dict:
         lists[16 + i].append(tk)
     # mHC's coefficients before the experts' queue opens; the sublayer's end after sum_store's tasks
     idle = max(sms - len(order), 1)   # the SMs with no task before the experts: the mixes run there first (their input is ready)
-    for i, tk in enumerate(tasks("hc_mix")):
-        lists[len(order) % sms + i % idle].append(tk)
+    mix = tasks("hc_mix")
+    if T > 8 and idle < len(mix) and os.environ.get("DSV41_MOE_MIX_SPREAD", "0") != "0":
+        # (11-24) T = 16 / 32: the front's tasks fill every SM (T = 16: 148 of them, T = 32: 196), so idle = 1 put all 32 mixes
+        # on one SM, in turn (in situ, T = 16: 8.7 -> 84 us), and hc_coef, that SM's experts, sum_store and the post waited for
+        # them (the kernel 102 us). One mix each behind x_q's and the router's tasks instead, which end first (~4 and ~5 us)
+        early = [sm for sm in range(min(len(order), sms)) if names[order[sm][0]] in ("x_q", "logit_part")]
+        for i, tk in enumerate(mix):
+            lists[early[i % len(early)]].append(tk)
+    else:
+        for i, tk in enumerate(mix):
+            lists[len(order) % sms + i % idle].append(tk)
     for i, tk in enumerate(tasks("hc_coef")):
         lists[sms - 1 - i].append(tk)
     lists = [lists[sm] + [(ex, (sm, 0, 0))] + ys[sm:sm + 1] for sm in range(sms)]
