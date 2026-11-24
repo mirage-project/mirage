@@ -16,7 +16,14 @@
 #pragma once
 
 #include "mirage/config.h"
+#if defined(MIRAGE_BACKEND_USE_NKI) && !defined(MIRAGE_BACKEND_USE_CUDA)
+// CPU-only builds have no CUDA toolkit; declare the two handle types used by
+// RuntimeConfig below exactly as cuda_runtime_api.h declares them.
+typedef struct CUstream_st *cudaStream_t;
+typedef struct CUevent_st *cudaEvent_t;
+#else
 #include <cuda_runtime.h>
+#endif
 
 #ifdef USE_NVSHMEM
 #include <nvshmem.h>
