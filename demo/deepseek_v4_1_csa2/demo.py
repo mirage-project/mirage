@@ -315,7 +315,14 @@ def hand_plan(mpk: StaticMegakernel, heads: int, cap: int, cmp_rows: int, sms: i
     topk_first = cap > 2048
     first = [tk for tk in before if topk_first and names[tk[0]] == "compress_idx"]
     before = [tk for tk in before if tk not in first]
-    m = n + len(first)
+    # (11-24, default off) DSV41_TOPK_WITH_SA=1, sparse_attn not split (own[t]: token t's only task): each token's top-k task
+    # right ahead of its sparse_attn task, on its SM, instead of on an SM of its own. 64 SMs more for the nodes before sparse_attn
+    # (T = 64: the hand plan instead of round robin, whose node order put the top-k behind the indexer's q and k tasks: in situ
+    # full_r2, the lists there at 48 - 58 us although the indexer skip writes them at once). At a long context a top-k waits
+    # for its token's scores, which run on the other SMs, and its sparse_attn task is behind it: no cycle
+    with_sa = (bool(first) and len(first) == n and os.environ.get("DSV41_TOPK_WITH_SA", "0") != "0"
+               and all(own[i][1][0] == first[i][1][0] for i in range(n)))
+    m = n if with_sa else n + len(first)
     # (11-24) or, T = 64 not split (DSV41_SA_NOSPLIT_MIN_T: 64 sparse_attn tasks), an index layer of ratio 1 (the top-k's tasks
     # first too, 20 SMs left for ~1500 tasks: past the 63 an SM holds)
     if T > 8 and (m >= sms or len(before) > 40 * (sms - m)):   # (11-21: sparse_attn's tasks leave no SM for the nodes
@@ -343,6 +350,9 @@ def hand_plan(mpk: StaticMegakernel, heads: int, cap: int, cmp_rows: int, sms: i
                     on[sm].add(q[0])
         return p
     lists = [[own[sm]] if sm < n else [first[sm - n]] if sm < m else before[sm - m::sms - m] for sm in range(sms)]
+    if with_sa:
+        for sm in range(n):
+            lists[sm].insert(0, first[sm])
     # (DSV41_ENGRAM=2) Engram's kv tasks behind the nodes before sparse_attn, round robin over the SMs without a sparse_attn
     # task, ahead of the nodes after it: they run while sparse_attn's inputs and o_q are computed (wo_a / wo_b wait for o_q).
     # DSV41_EG_PLACE=wob: instead just ahead of each SM's first wo_b task (wo_a's weights load first; wo_b waits for oa_q)
