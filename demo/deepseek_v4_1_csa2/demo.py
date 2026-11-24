@@ -367,9 +367,22 @@ def hand_plan(mpk: StaticMegakernel, heads: int, cap: int, cmp_rows: int, sms: i
     # Only one each (n >= the mHC tasks): with more (SWA, 16 sparse_attn SMs at T = 16: 3 each) sparse_attn's tasks started
     # 16 us late (in situ, swa 40.5 -> 46.6 us; its q is there at ~16 us)
     front = T > 8 and not hc and os.environ.get("DSV41_HC_FRONT", "0") != "0" and n >= len(mix) + len(coef)
+    # (11-24, default off) DSV41_HC_FRONT_WRAP=1: also with more of them than sparse_attn's SMs, in turn (the mixes ahead of the
+    # coefficients on an SM, which wait for every mix), in a layer with compressed KV: T = 64 not split (64 SMs, 96 tasks),
+    # where sparse_attn's q is there at ~24 us and the old place behind o_q delayed wo_a (in situ, reuse: wo_a from 54 us,
+    # o_q ended at 44). Not SWA: its q is there at ~16 us
+    compressed = any(nd.name == "sparse_attn" and len(nd.params) > 5 for nd in nodes)
+    wrap = (T > 8 and not hc and not front and n > 0 and compressed
+            and os.environ.get("DSV41_HC_FRONT_WRAP", "0") != "0")
     if front:
         for i, tk in enumerate(mix + coef):
             lists[i].insert(0, tk)
+    elif wrap:
+        put = [0] * sms
+        for i, tk in enumerate(mix + coef):
+            lists[i % n].insert(put[i % n], tk)
+            put[i % n] += 1
+        front = True   # (placed: not again below)
     off = max(n, min(n + nwo, sms - len(mix) - len(coef))) if hc == "fit" else int(hc) if hc else n + nwo
     for i, tk in enumerate(mix if not front else []):
         lists[(off + i) % sms].append(tk)
