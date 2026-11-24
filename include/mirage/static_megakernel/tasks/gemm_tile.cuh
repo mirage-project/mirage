@@ -306,6 +306,7 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
           prefill_weights<ROWS>(j, L.base, L.gl, npre);
         }
         cnt_wait(cnt_now(g) + ACT::counter, ACT::x * ACT::y * ACT::z);
+        asm volatile("fence.proxy.async.global;" ::: "memory"); // then TMA reads
 #ifdef STATIC_TIMING_BUILD
         if (npre && L.stage_stamps) {
           L.stage_stamps[0] = gtime(); // the activation ready (no load stamp)
