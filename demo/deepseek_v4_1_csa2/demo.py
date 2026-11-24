@@ -320,7 +320,10 @@ def hand_plan(mpk: StaticMegakernel, heads: int, cap: int, cmp_rows: int, sms: i
     # (T = 64: the hand plan instead of round robin, whose node order put the top-k behind the indexer's q and k tasks: in situ
     # full_r2, the lists there at 48 - 58 us although the indexer skip writes them at once). At a long context a top-k waits
     # for its token's scores, which run on the other SMs, and its sparse_attn task is behind it: no cycle
-    with_sa = (bool(first) and len(first) == n and os.environ.get("DSV41_TOPK_WITH_SA", "0") != "0"
+    # Only a layer with a compressor (ratio 2: full_r2): in a ratio-1 index layer (4608 positions, about 1700 tasks before
+    # sparse_attn, 1150 of them the scores) the 84 SMs left were slower than round robin (Modal, 40 layers, bs 64: 8824.9 ->
+    # 8973.3 us with it on every index layer; layer 20's scores are computed in full)
+    with_sa = (bool(first) and len(first) == n and cmp_rows > 0 and os.environ.get("DSV41_TOPK_WITH_SA", "0") != "0"
                and all(own[i][1][0] == first[i][1][0] for i in range(n)))
     m = n if with_sa else n + len(first)
     # (11-24) or, T = 64 not split (DSV41_SA_NOSPLIT_MIN_T: 64 sparse_attn tasks), an index layer of ratio 1 (the top-k's tasks
