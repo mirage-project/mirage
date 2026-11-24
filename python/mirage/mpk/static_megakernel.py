@@ -25,6 +25,8 @@ from .persistent_kernel import PersistentKernel
 
 # the kernel's limits (config.cuh MAX_BUFS, MAX_MAPS, NODE_COUNTER_LINES, SMAX = the ring's stages; core.cuh Combine)
 MAX_BUFS, MAX_MAPS, NODE_COUNTER_LINES, RING_STAGES = 24, 32, 16, 5   # RING_STAGES: T <= 16's (ring_stages)
+MAX_MAPS_CAP = 64   # a graph with more than MAX_MAPS tensor maps raises max_maps up to this (the generated layer then defines
+                    # STATIC_MAX_MAPS; 128 B of kernel parameters a map)
 
 
 def ring_stages(tokens: int) -> int:
@@ -227,9 +229,18 @@ class StaticMegakernel(PersistentKernel):
         for i, m in enumerate(self._maps):
             if m[3] == key:
                 return i
-        assert len(self._maps) < MAX_MAPS, f"more than {MAX_MAPS} tensor maps (config.cuh MAX_MAPS)"
+        self._map_room(1)
         self._maps.append((kind, source, tuple(dims), key))
         return len(self._maps) - 1
+
+    def _map_room(self, n: int):
+        """Room for n more tensor maps: past config.cuh's MAX_MAPS the graph raises max_maps (11-23: DeepSeek-V4.1's last MoE
+        layer with the LM head and the expert compaction at T >= 32 needs more than 32); a graph within MAX_MAPS keeps
+        config.cuh's size (no STATIC_MAX_MAPS: its code is unchanged)."""
+        need = len(self._maps) + n
+        if need > MAX_MAPS:
+            assert need <= MAX_MAPS_CAP, f"more than {MAX_MAPS_CAP} tensor maps (static_megakernel.MAX_MAPS_CAP)"
+            self.max_maps = max(getattr(self, "max_maps", None) or 0, need)
 
     def _gemm_map(self, tensor: DTensor, box_rows: tuple) -> int:
         """The map slots of a bf16 [rows, K] tensor, one per box row count in box_rows (consecutive slots; the same tensor and
@@ -238,7 +249,7 @@ class StaticMegakernel(PersistentKernel):
         for i in range(len(self._maps) - len(box_rows) + 1):
             if all(self._maps[i + j][3] == ("bf16", ("t", tensor.guid), (rows, K, b)) for j, b in enumerate(box_rows)):
                 return i
-        assert len(self._maps) + len(box_rows) <= MAX_MAPS, f"more than {MAX_MAPS} tensor maps (config.cuh MAX_MAPS)"
+        self._map_room(len(box_rows))
         first = len(self._maps)
         for b in box_rows:
             self._maps.append(("bf16", ("t", tensor), (rows, K, b), ("bf16", ("t", tensor.guid), (rows, K, b))))
