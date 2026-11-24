@@ -255,11 +255,14 @@ def hand_grids(heads: int, cap: int, cmp_rows: int = 0) -> dict:
     wkvp = int(os.environ.get("WKV_PARTS", 2))   # wkv's K parts (C7a WKV_PARTS=4, measurement 11-18)
     if not cmp_rows and os.environ.get("WKV_PARTS_NOCMP"):   # (C7c, 11-18) on the layers without a compressor only
         wkvp = int(os.environ["WKV_PARTS_NOCMP"])
+    # (11-23, default off) DSV41_WOB2=1: at T = 64, wo_b's K (2048 at TP4) in 2 parts: 80 tasks, one round of the 148 SMs, in
+    # place of 160 in 2 rounds (T = 64's wo_b is not fused with oa_q's quantization either way)
+    wobp = 2 if T == 64 and os.environ.get("DSV41_WOB2", "0") != "0" else 4
     return {"x_q": (T, 2, 1), "wq_a_part": (QL // 128, 4, 1), "qr_q": (T, 1, 1), "wq_b_part": (heads * D // 128, 1, 1),
             "wkv_part": (D // 128, wkvp, 1),
             "window_cache": (T, 1, 1), "o_q": (T, heads // 16, 1),
             "wo_a_part": (G * OL // 128, max(2, 64 // (G * OL // 128)), 1), "oa_q": (T, G * OL // 2048, 1),
-            "wo_b_part": (HID // 128, 4, 1), "y": (HID // 128, 1, 1), "y_sent": (HID // 128, 1, 1), "cmp_part": (max(cmp_rows, 128) // 128, 4, 1), "latent": (T, 1, 1),
+            "wo_b_part": (HID // 128, wobp, 1), "y": (HID // 128, 1, 1), "y_sent": (HID // 128, 1, 1), "cmp_part": (max(cmp_rows, 128) // 128, 4, 1), "latent": (T, 1, 1),
             "compress_cache": (T, 1, 1), "wk_part": (1, 1, 1), "index_k": (T, 1, 1), "iq_part": (4096 // 128, 1, 1),
             "q_idx": (T, 1, 1), "wp_part": (1, 4, 1), "compress_idx": (T, 1, 1)}
 
