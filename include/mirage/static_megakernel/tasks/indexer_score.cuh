@@ -67,6 +67,19 @@ __device__ __forceinline__ void
                : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 }
 
+// (11-24, default off) -DIDX_SKIP: a token with at most IDX_SKIP_K (the top-k's
+// KTOP, 512) compressed positions needs no scores (indexer_topk then writes every
+// position: its IDX_SKIP): its chunk tasks compute nothing (no waits), only count
+// and re-arm as before. Not for the candidate source layer (its top-k reads the
+// scores for its candidate blocks): the hook passes the flag to the others only
+#ifdef IDX_SKIP
+#ifndef IDX_SKIP_K
+#define IDX_SKIP_K 512
+#endif
+#define IS_LIVE(k0, n) ((k0) < (n) && (n) > IDX_SKIP_K)
+#else
+#define IS_LIVE(k0, n) ((k0) < (n))
+#endif
 template <int H,
           int HD,
           int CAP,
@@ -98,7 +111,7 @@ __device__ __forceinline__ void indexer_score_task(__nv_bfloat16 const *q,
             qd = l & 3;
   int const p = pos[t], n = (p + 1) / R, k0 = c * CH;
   __syncthreads(); // the shared memory may be the ring's of a GEMM before
-  if (k0 < n) {
+  if (IS_LIVE(k0, n)) {
     __nv_bfloat16 *const qs = reinterpret_cast<__nv_bfloat16 *>(sm + IS_OFF_Q);
     unsigned char const *const kr =
         reinterpret_cast<unsigned char const *>(sm + IS_OFF_K);
@@ -248,7 +261,7 @@ __device__ __forceinline__ void indexer_score_task(__nv_bfloat16 const *q,
     }
   }
   __syncthreads();
-  if (k0 < n) {
+  if (IS_LIVE(k0, n)) {
     IS_MARK(3)
   }
   if constexpr (REARM) {
@@ -448,7 +461,7 @@ __device__ __forceinline__ void
   int const p = pos[t], n = (p + 1) / R, k0 = c * CH;
   uint32_t const bar = su32(is5_bars);
   __syncthreads(); // the shared memory may be the ring's of a GEMM before
-  if (k0 < n) {
+  if (IS_LIVE(k0, n)) {
     float *const ws = reinterpret_cast<float *>(sm + is5_off_w(CH));
     if constexpr (KNODE) { // index_k_post wrote token t's row this launch
       if (tid == 0) {
@@ -668,7 +681,7 @@ __device__ __forceinline__ void
     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
   }
   __syncthreads();
-  if (k0 < n) {
+  if (IS_LIVE(k0, n)) {
     IS_MARK(3)
   }
   if constexpr (REARM) { // as indexer_score_task

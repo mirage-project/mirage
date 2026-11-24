@@ -207,6 +207,30 @@ __device__ __forceinline__ void indexer_topk_task(__nv_bfloat16 const *scores,
   int *const sel = red + 16;                                        // KTOP
   __syncthreads(); // the shared memory may be the ring's of a GEMM before
   int *const out = idx + (size_t)t * KTOP;
+#ifdef IDX_SKIP
+  // (11-23, default off) n <= KTOP: the top-k is every position, in position
+  // order (what the select and the compaction give for k = n, whatever the
+  // scores), so the list is written at once, without waiting for indexer_score:
+  // sparse_attn's compressed pairs no longer wait for the indexer. Not CSRC
+  // (its candidate blocks come from the scores)
+#ifndef IDX_SKIP_K
+#define IDX_SKIP_K 512
+#endif
+  // (indexer_score.cuh skips its chunks below the same bound)
+  static_assert(CSRC || KTOP == IDX_SKIP_K, "IDX_SKIP: indexer_score's bound is the top-k's KTOP");
+  if constexpr (!CSRC) {
+    if (n <= KTOP) {
+      for (int j = tid; j < KTOP; j += 256) {
+        out[j] = j < n ? j : -1;
+      }
+      __syncthreads();
+      if (tid == 0) {
+        cnt_add(done_cnt + t, 1); // release: the CTA's stores before
+      }
+      return;
+    }
+  }
+#endif
 #pragma unroll 1
   for (int pass = warm ? 1 : 0; pass < 2; pass++) {
     bool const real = pass == 1;

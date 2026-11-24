@@ -500,6 +500,23 @@ class StaticAttn(MhcMixin):
         # 4.6 us less a layer); DSV41_STATIC_IS_TCGEN05=1 turns it on here (default off: this tree's measured builds)
         if os.environ.get("DSV41_STATIC_IS_TCGEN05", "0") != "0" and self.variant not in ("swa", "reuse"):
             flags.append("-DIS_TCGEN05")
+        # (11-24, default off) DSV41_SA_SKIP=1: sparse_attn's empty compressed pairs return at entry (counted
+        # only) at T >= 32 (tasks/sparse_attn.cuh SA_SKIP_EMPTY, SA_SKIP_MIN_T 32); with DSV41_SA_ORDER=z (the demo's
+        # hand_plan) T = 32's tasks pair-major, so the second round holds the last pairs
+        if os.environ.get("DSV41_SA_SKIP", "0") != "0" and T >= 32:
+            flags.append("-DSA_SKIP_EMPTY")
+        # (11-24, default off) DSV41_SA_NOSPLIT_MIN_T=64: sparse_attn not split from that T on (static_megakernel
+        # sparse_attn_layer: one task a token, T = 64 64 tasks in one round, not 320 in 3), its loop over the live pairs
+        # only (-DSA_NS_SKIP)
+        if 0 < int(os.environ.get("DSV41_SA_NOSPLIT_MIN_T", "0")) <= T and self.variant != "swa":
+            flags.append("-DSA_NS_SKIP")
+        # (11-24, default off) DSV41_IDX_SKIP=1: a token with at most 512 compressed positions (the top-k's KTOP) takes
+        # every position: indexer_topk writes the list at once and indexer_score's tasks compute nothing (tasks/indexer_*.cuh
+        # IDX_SKIP), at T >= DSV41_IDX_SKIP_MIN_T (default 16). The index layers but the candidate source (full_r1, layer
+        # 20: its top-k reads the scores for its candidate blocks)
+        if os.environ.get("DSV41_IDX_SKIP", "0") != "0" and self.variant in ("full_r2", "reindex") \
+                and T >= int(os.environ.get("DSV41_IDX_SKIP_MIN_T", "16")):
+            flags.append("-DIDX_SKIP")
         # I1c (11-19; default off): DSV41_I1C=1 builds the index layers' attention kernels (DSV41_I1C_VARIANTS) with
         # -DI1C_HCP: the post's R and gamma prefetched into L1 instead of held in registers across the all-reduce wait
         # (tasks/hc_post_combine.cuh; the same values). DSV41_I1C=2 adds -DI1C_SA for full_r2 and full_r1: sparse_attn's

@@ -863,7 +863,10 @@ class StaticMegakernel(PersistentKernel):
                 # (2 or 4 pairs in a task's prologue would outlast its wait)
                 slots.append(self._scratch("sparse_attn_kbf16", T * NC * 520 * 2))
                 counters, concurrent = 1 + T * (NC // 128), 1
-            elif H // 16 < NC // 128:
+            elif H // 16 < NC // 128 and not (0 < int(os.environ.get("DSV41_SA_NOSPLIT_MIN_T", "0")) <= T):
+                # ((11-24, default off) DSV41_SA_NOSPLIT_MIN_T=64: from that T on, not split: one task a
+                # token (T = 64: 64 tasks, one round, not 320 in 3), the window and the pairs in turn; with -DSA_NS_SKIP only
+                # the live pairs)
                 # a task per pair (the window's, then NC / 128 compressed): its block maxima to the others first (into
                 # sparse_attn_ml, 0xFF before each launch: polled), then its O (but its own share) and block sums into the
                 # partials (fp32: O [T][H / 16][splits][16][D], 0xFF: polled by the share's one reader, which re-arms it;

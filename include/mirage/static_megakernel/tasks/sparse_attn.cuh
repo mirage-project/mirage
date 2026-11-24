@@ -486,6 +486,54 @@ __device__ SA_TASK_INLINE void sparse_attn_task(float const *q,
   // block 1, their sums; mlb [T][H / 16][NS][16][4], 0xFF before each launch)
   float *const pml =
       SPLIT ? mlb + (size_t)(t * G + g) * NS * SA_HPT * 4 : nullptr;
+#ifdef SA_SKIP_EMPTY
+#ifndef SA_SKIP_MIN_T
+#define SA_SKIP_MIN_T 32
+#endif
+  // (at T >= SA_SKIP_MIN_T: there a split's tasks need more than one round of
+  // the SMs; the T = 8 / 16 builds stay as they were unless asked)
+  constexpr bool SKIP = SPLIT && T >= SA_SKIP_MIN_T;
+#else
+  constexpr bool SKIP = false;
+#endif
+  // (11-23, -DSA_SKIP_EMPTY, split) the token's live pairs NL: the window's
+  // and the compressed pairs whose first list entry is a row (the list is
+  // ascending, -1 padded, so a pair is empty iff its first entry is -1). An
+  // empty pair's blocks are all -inf: in the official chain its rescales are 1
+  // and its sums 0, and it adds nothing to O, so its task only counts itself
+  // and the live tasks share the combine among them (the same bits). A list
+  // that is a graph input (a Reuse layer): here; an indexer's: after its
+  // counter (the pair tasks' wait, the window task's before its combine)
+  auto live_pairs = [&](bool relaxed) {
+    int n = 1;
+#pragma unroll
+    for (int c = 0; c < NP; c++) {
+      int const *a = cidx + (size_t)t * NC + 128 * c;
+      int id;
+      if (relaxed) {
+        asm volatile("ld.relaxed.gpu.global.s32 %0, [%1];"
+                     : "=r"(id)
+                     : "l"(a)
+                     : "memory");
+      } else {
+        id = *a;
+      }
+      n += id >= 0 ? 1 : 0;
+    }
+    return n;
+  };
+  int NL = NS; // (SKIP: the live pairs, below)
+  if constexpr (SKIP && !CNODE) {
+    NL = live_pairs(false);
+    if (s >= NL) { // an empty pair's task: counted, nothing else (nothing
+                   // read or written yet)
+      __syncthreads();
+      if (tid == 0) {
+        cnt_add(done_cnt, 1);
+      }
+      return;
+    }
+  }
   // the token's window (W rows, 66 KB) into L2 first: the 4 rounds below then
   // wait for L2, not HBM (L2 is emptied before each launch; the loop's
   // rounds wait one after another)
@@ -658,6 +706,24 @@ __device__ SA_TASK_INLINE void sparse_attn_task(float const *q,
 #pragma unroll 1
   for (int pass = warm ? 1 : -SA_EXTRA_DRY; pass < 2; pass++) {
     bool const real = pass == 1;
+    if constexpr (SKIP && CNODE) { // a pair task: the token's list first, and
+                                   // an empty pair's task stops before q
+      if (real && !win) {
+        if (tid == 0) {
+          cnt_wait(ci_cnt + t, 1); // indexer_topk wrote token t's list
+        }
+        __syncthreads();
+        NL = live_pairs(true);
+        if (s >= NL) { // an empty pair's task: counted, nothing else
+          asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+          __syncthreads();
+          if (tid == 0) {
+            cnt_add(done_cnt, 1);
+          }
+          return;
+        }
+      }
+    }
     // q from wq_b's parts, before the kv wait (a Full layer's compressed
     // pair: before its list's wait too; q usually comes before the top-k)
     sa_q_parts<H, D, RD, QP, !SPLIT>(q, freqs, qs, t, g, p, real);
@@ -742,7 +808,25 @@ __device__ SA_TASK_INLINE void sparse_attn_task(float const *q,
     float mr = -1.0e30f, sr = 0.f; // the softmax thread's head's
     float bs0 = 0.f, bs1 = 0.f;    // (split: the pair's block sums)
     // (split: pair s alone, its K in ks since the prologue or the pass start)
+#ifdef SA_NS_SKIP
+    int nlp = NC / 128; // (the compressed pairs the loop runs)
+    // (11-24, default off) not split (one task a token: the window, then the
+    // pairs in turn): only the live pairs, those whose first list entry is a
+    // row (the list is ascending, -1 padded: the rest are empty). An empty
+    // pair's blocks are all -inf: in the official chain its rescales are 1 and
+    // its sums 0 and it adds nothing to O, so stopping there gives the same bits
+    if constexpr (!SPLIT && NC > 0) {
+      if (real) {
+        nlp = 0;
+        while (nlp < NC / 128 && ids[128 * nlp] >= 0) {
+          nlp++;
+        }
+      }
+    }
+    int const npair = SPLIT ? s + 1 : 1 + (real ? nlp : (NC > 0 ? 1 : 0));
+#else
     int const npair = SPLIT ? s + 1 : 1 + (real ? NC / 128 : (NC > 0 ? 1 : 0));
+#endif
 #pragma unroll 1
     for (int pr = SPLIT ? s : 0; pr < npair; pr++) {
       if constexpr (!BF16K) {
@@ -1088,7 +1172,18 @@ __device__ SA_TASK_INLINE void sparse_attn_task(float const *q,
       // below). The tail on
       // the combined share (the dry pass: O's values from os, maxima 0, sums
       // 1)
-      int const b0 = s * NB / NS, b1 = (s + 1) * NB / NS, nb = b1 - b0;
+      if constexpr (SKIP && CNODE) { // the window task: the token's list
+        if (real && win) {
+          if (tid == 0) {
+            cnt_wait(ci_cnt + t, 1);
+          }
+          __syncthreads();
+          NL = live_pairs(true);
+        }
+      }
+      // (SKIP) the shares over the live tasks only
+      int const NLS = SKIP ? NL : NS;
+      int const b0 = s * NB / NLS, b1 = (s + 1) * NB / NLS, nb = b1 - b0;
       size_t const grp = (size_t)(t * G + g) * NS;
       float *const po = part + grp * (SA_HPT * D);
       float *const fac = reinterpret_cast<float *>(sm + SA_OFF_Y); // [NS][16]
@@ -1134,6 +1229,7 @@ __device__ SA_TASK_INLINE void sparse_attn_task(float const *q,
                 r = gq >> 4, gi = gq & 15, rh = tid >> 4;
       bool const sumt = (tid & 15) == 0;
 #ifdef I1C_SA
+      static_assert(!SKIP, "sparse_attn: I1C_SA's combine does not skip");
       // I1c (11-19): the other splits' values loaded one split at a time and
       // stored into shared memory once valid, in K's area (free in the real
       // pass's tail: every copy waited for; the dry pass's tail never touches
@@ -1226,6 +1322,105 @@ __device__ SA_TASK_INLINE void sparse_attn_task(float const *q,
         quant8(r, gi, x, rs[4 * r + 3], act);
       }
 #else
+      if constexpr (SKIP) {
+      // (SKIP) the share of NB / NL blocks (up to all 64 with one live task):
+      // its 4 nb 32-column groups over the 64 quads in rounds; the sums and
+      // the chain once, in round 0
+      int const nrd = (4 * nb + 63) / 64;
+#pragma unroll 1
+      for (int rd = 0; rd < nrd; rd++) {
+        int const qr = qq + 64 * rd;
+        bool const actr = qr < 4 * nb;
+        int const gqr = 4 * b0 + (actr ? qr : 0), rr = gqr >> 4, gir = gqr & 15;
+        float4 v[NS][2], sv[NS];
+        {
+          float const *const src = po + 32 * gqr + 8 * q4; // + s2 16 D
+          float const *const own = os + rr * SA_OSLD + 32 * gir + 8 * q4;
+          bool ok[NS], oks[NS];
+#pragma unroll
+          for (int s2 = 0; s2 < NS; s2++) {
+            bool const dead = s2 >= NLS; // an empty pair: not polled
+            ok[s2] = !real || !actr || s2 == s || dead;
+            oks[s2] = !real || !sumt || dead || rd > 0;
+            v[s2][0] = *reinterpret_cast<float4 const *>(own);
+            v[s2][1] = *reinterpret_cast<float4 const *>(own + 4);
+            sv[s2] = make_float4(0.f, 0.f, 1.f, 1.f);
+          }
+          bool all;
+          do {
+#pragma unroll
+            for (int s2 = 0; s2 < NS; s2++) {
+              if (!oks[s2]) {
+                sv[s2] = ldf4_poll(pml + (s2 * SA_HPT + rh) * 4);
+              }
+              if (!ok[s2]) {
+                v[s2][0] = ldf4_poll(src + (size_t)s2 * SA_HPT * D);
+                v[s2][1] = ldf4_poll(src + (size_t)s2 * SA_HPT * D + 4);
+              }
+            }
+            all = true;
+#pragma unroll
+            for (int s2 = 0; s2 < NS; s2++) {
+              if (!oks[s2]) {
+                oks[s2] = validf4(sv[s2]);
+              }
+              if (!ok[s2]) {
+                ok[s2] = validf4(v[s2][0]) && validf4(v[s2][1]);
+              }
+              all = all && ok[s2] && oks[s2];
+            }
+          } while (!all);
+        }
+        if (sumt && rd == 0) {
+          float m = -1.0e30f, sum = 0.f;
+#pragma unroll
+          for (int s2 = 0; s2 < NS; s2++) {
+            if (s2 >= NLS) {
+              break; // the empty pairs: rescales 1, sums 0
+            }
+            float const m1 = fmaxf(m, sv[s2].x), m2 = fmaxf(m1, sv[s2].y);
+            float const sc0 = expf(__fsub_rn(m, m1)),
+                        sc1 = expf(__fsub_rn(m1, m2));
+            sum = __fmaf_rn(__fmaf_rn(sum, sc0, sv[s2].z), sc1, sv[s2].w);
+            *reinterpret_cast<float2 *>(fac + (s2 * SA_HPT + rh) * 2) =
+                make_float2(sc0, sc1);
+            m = m2;
+          }
+          rs[4 * rh + 3] = __fadd_rn(sum, expf(__fsub_rn(snk, m)));
+        }
+        __syncthreads(); // fac, the denominators
+        if (real && rd == 0) {
+          SA_MARK(18)
+        }
+        {
+          float x[8];
+#pragma unroll
+          for (int s2 = 0; s2 < NS; s2++) {
+            if (s2 >= NLS) {
+              break; // nothing added by the empty pairs
+            }
+            float2 const f =
+                *reinterpret_cast<float2 const *>(fac + (s2 * SA_HPT + rr) * 2);
+            float const y[8] = {v[s2][0].x,
+                                v[s2][0].y,
+                                v[s2][0].z,
+                                v[s2][0].w,
+                                v[s2][1].x,
+                                v[s2][1].y,
+                                v[s2][1].z,
+                                v[s2][1].w};
+#pragma unroll
+            for (int e = 0; e < 8; e++) {
+              x[e] = s2 == 0
+                         ? y[e]
+                         : __fadd_rn(__fmul_rn(__fmul_rn(x[e], f.x), f.y),
+                                     y[e]);
+            }
+          }
+          quant8(rr, gir, x, rs[4 * rr + 3], actr);
+        }
+      }
+      } else {
       float4 v[NS][2], sv[NS];
       {
         float const *const src = po + 32 * gq + 8 * q4; // + s2 16 D
@@ -1307,6 +1502,7 @@ __device__ SA_TASK_INLINE void sparse_attn_task(float const *q,
         }
         quant8(r, gi, x, rs[4 * r + 3], act);
       }
+      } // (SKIP)
 #endif
       lb0 = b0;
       lnb = nb;
@@ -1352,18 +1548,34 @@ __device__ SA_TASK_INLINE void sparse_attn_task(float const *q,
     // CTA's stores before it, not these; the next writers are the next
     // launch's): the other partials' share values this task polled, and q's
     // parts of its share (every split read them before its maxima)
-    int const b0 = s * NB / NS, nb = (s + 1) * NB / NS - b0, qq = tid >> 2;
-    if (qq < 4 * nb) {
-      float *const src = part + (size_t)(t * G + g) * NS * (SA_HPT * D) +
-                         32 * (4 * b0 + qq) + 8 * (tid & 3);
+    int const NLS = SKIP ? NL : NS; // (SKIP) the live tasks' shares
+    int const b0 = s * NB / NLS, nb = (s + 1) * NB / NLS - b0, qq = tid >> 2;
+    if constexpr (SKIP) { // (the share's groups in rounds of 64, as above)
+      for (int qr = qq; qr < 4 * nb; qr += 64) {
+        float *const src = part + (size_t)(t * G + g) * NS * (SA_HPT * D) +
+                           32 * (4 * b0 + qr) + 8 * (tid & 3);
 #pragma unroll
-      for (int s2 = 0; s2 < NS; s2++) {
-        if (s2 != s) {
-          rearm16(src + (size_t)s2 * SA_HPT * D);
-          rearm16(src + (size_t)s2 * SA_HPT * D + 4);
+        for (int s2 = 0; s2 < NS; s2++) {
+          if (s2 != s && s2 < NLS) {
+            rearm16(src + (size_t)s2 * SA_HPT * D);
+            rearm16(src + (size_t)s2 * SA_HPT * D + 4);
+          }
+        }
+      }
+    } else {
+      if (qq < 4 * nb) {
+        float *const src = part + (size_t)(t * G + g) * NS * (SA_HPT * D) +
+                           32 * (4 * b0 + qq) + 8 * (tid & 3);
+#pragma unroll
+        for (int s2 = 0; s2 < NS; s2++) {
+          if (s2 != s) {
+            rearm16(src + (size_t)s2 * SA_HPT * D);
+            rearm16(src + (size_t)s2 * SA_HPT * D + 4);
+          }
         }
       }
     }
+
     float const *src = q + (size_t)t * N + (size_t)g * SA_HPT * D + 128 * b0;
     for (int i = tid; i < QP * nb * 32; i += 256) {
       int const pp = i / (nb * 32), v4 = i - pp * (nb * 32);

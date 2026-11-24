@@ -316,9 +316,32 @@ def hand_plan(mpk: StaticMegakernel, heads: int, cap: int, cmp_rows: int, sms: i
     first = [tk for tk in before if topk_first and names[tk[0]] == "compress_idx"]
     before = [tk for tk in before if tk not in first]
     m = n + len(first)
-    if T > 8 and m >= sms:   # (11-21: sparse_attn's tasks leave no SM for the nodes before it) round robin with these grids
+    # (11-24) or, T = 64 not split (DSV41_SA_NOSPLIT_MIN_T: 64 sparse_attn tasks), an index layer of ratio 1 (the top-k's tasks
+    # first too, 20 SMs left for ~1500 tasks: past the 63 an SM holds)
+    if T > 8 and (m >= sms or len(before) > 40 * (sms - m)):   # (11-21: sparse_attn's tasks leave no SM for the nodes
+        # before it) round robin with these grids
         from mirage.mpk import plan_gen
-        return plan_gen.round_robin_plan(mpk, grids)
+        p = plan_gen.round_robin_plan(mpk, grids)
+        if os.environ.get("DSV41_SA_ORDER", "") == "z" and T == 32:
+            # (11-24, default off; with -DSA_SKIP_EMPTY) sparse_attn's tasks in the slots the round robin dealt them, but
+            # pair-major (every token's window task, then every token's pair 1, ..): the 12 tasks past the first round (160
+            # on 148 SMs) are then the last pairs, empty at short contexts (in situ, T = 32 reuse 71.3 -> 61.3 us). The slots
+            # in their order on the SMs (place, then SM), each taking the first task left whose token has no task on that SM
+            # yet: a token's tasks poll each other (the maxima, the shares), so two on one SM could deadlock. Not T = 64:
+            # with 3 rounds a token's tasks wait for each other's shares across rounds, behind other tokens' (compile_plan
+            # refuses it); T = 64 runs sparse_attn not split instead (DSV41_SA_NOSPLIT_MIN_T)
+            for lists in p["lists"]:
+                slots = sorted((i, sm) for sm, lst in enumerate(lists) for i, tk in enumerate(lst) if tk[0] == sa)
+                left = sorted((lists[sm][i][1] for i, sm in slots), key=lambda q: (q[2], q[0], q[1]))
+                on = [set() for _ in lists]
+                for i, sm in slots:
+                    j = next((j for j, q in enumerate(left) if q[0] not in on[sm]), None)
+                    if j is None:
+                        raise ValueError(f"DSV41_SA_ORDER=z: no task for slot {i} of SM {sm} without a token there")
+                    q = left.pop(j)
+                    lists[sm][i] = (sa, q)
+                    on[sm].add(q[0])
+        return p
     lists = [[own[sm]] if sm < n else [first[sm - n]] if sm < m else before[sm - m::sms - m] for sm in range(sms)]
     # (DSV41_ENGRAM=2) Engram's kv tasks behind the nodes before sparse_attn, round robin over the SMs without a sparse_attn
     # task, ahead of the nodes after it: they run while sparse_attn's inputs and o_q are computed (wo_a / wo_b wait for o_q).
