@@ -17,7 +17,7 @@ the megakernel issues, not approximations of them.
 ```bash
 make run                      # print both benchmarks' tables
 make run JSON=b200            # also record b200_sync.json and b200_tma.json
-make run SM=90a               # build for a different target (default 100a)
+make run SM=90a JSON=h100     # H100 (Hopper); default target is 100a (B200)
 ```
 
 Plain CUDA binaries with no PyTorch dependency (they link NVML for the
@@ -78,6 +78,57 @@ A second clean run on another B200 in the same node agrees with every median
 above to within 2% (its far group is up to 2% faster). The rows for 1–8
 contending SMs depend on which SMs those few blocks land on: there they were
 far ones, at 433 ns.
+
+## Measured: NVIDIA H100 80GB HBM3, 132 SMs, driver 12080
+
+Build with `make SM=90a`. SM clock measured at runtime: **1.980 GHz**. Two full
+runs on one H100 (CHTC, inside a container); every median below agrees between
+the runs to within 0.5%. Both runs print `PROVISIONAL`: inside the container
+NVML lists one other process after the run (the benchmark itself, under a
+different PID namespace, as the section below describes), while the ALU
+sentinel spread is 1.0000 at start and end and the SM clock is unchanged.
+
+Each primitive is measured on every one of the 132 SMs against each of 8
+addresses — 1,056 samples. Unlike on B200, **no primitive splits into a near and
+a far group** here: each row is one distribution.
+
+| primitive | median | p10 | p90 |
+|---|---|---|---|
+| `atom.add.release.gpu.u64`, result discarded | 363.4 ns | 354.2 | 377.2 |
+| `atom.add.release.gpu.u64`, result used | 458.7 ns | 419.1 | 490.0 |
+| `__threadfence()` marginal cost | 329.9 ns | 321.4 | 343.9 |
+| `fence.proxy.async.global` marginal cost | 24.9 ns | 24.9 | 24.9 |
+| `fence.proxy.async.global` + `__threadfence()` marginal cost | 331.1 ns | 322.5 | 345.3 |
+| `ld.acquire.gpu.u64`, idle | 145.2 ns | 135.4 | 158.6 |
+| `ld.acquire.gpu.u64`, 131 SMs writing 3.2 TB/s (95% of HBM peak) | 211.0 ns | 190.6 | 234.0 |
+| runtime poll loop, one iteration, 1 queue | 253.0 ns | 238.9 | 263.6 |
+| runtime poll loop, one iteration, 2 queues | 252.1 ns | 242.6 | 256.0 |
+| `st.relaxed.gpu.u64` (baseline, fire-and-forget) | 1.0 ns | 1.0 | 1.0 |
+
+| threads | 128 | 256 | 512 |
+|---|---|---|---|
+| `__syncthreads()` | 10.48 ns | 14.53 ns | 22.61 ns |
+
+Contended atomics, one block per SM, one address (slowest SM):
+
+| contending SMs | slowest ns/op | aggregate ops/µs |
+|---|---|---|
+| 1 | 355.4 | 2.8 |
+| 2 | 373.0 | 5.4 |
+| 8 | 381.2 | 21.0 |
+| 32 | 380.2 | 84.2 |
+| 74 | 381.7 | 193.9 |
+| 132 | 390.5 | 338.0 |
+
+What differs from B200: one distribution instead of two groups, so a counter's
+cost does not depend on which SM touches it or where it lives; contention adds
+only ~35 ns from 1 to 132 SMs. What matches: the acquire load (145 vs 149 ns
+idle, 211 vs 220 ns under write load) and the runtime poll iteration (253 vs
+255 ns). `fence.proxy.async.global`, which orders generic-proxy against TMA
+accesses to global memory, costs ~25 ns on its own and adds ~1 ns when it is
+issued together with `__threadfence()`; it is an on-SM operation, so the cost
+is the same on every SM and address (p10 = p90). *Interpretation, not tested
+here:* H100 is a single die, which would explain the missing near/far split.
 
 ## What these say
 
@@ -280,6 +331,64 @@ Aggregate from HBM, every participating SM streaming its own slice of a
 | 32 | 2,331.3 | 5,142.6 | 525.4 | 1,498.5 |
 | 74 | 4,641.6 | 6,894.7 | 1,206.8 | 3,176.7 |
 | 148 | 6,520.0 (85% of peak) | 6,876.0 (90%) | 2,332.8 (30%) | 5,305.8 (69%) |
+
+### Measured: NVIDIA H100 80GB HBM3, 132 SMs, driver 12080
+
+L2 50 MiB; HBM peak 3,352 GB/s from memory clock × bus width. Same two runs as
+above (same `PROVISIONAL` note); medians agree to within 1.5% (the widest-spread
+row, a 4 KiB load from HBM, is the one that differs by 1.4%).
+
+Latency of one tile in flight, from issuing the load to the mbarrier wait
+returning, on every SM in turn (2,112 samples per row):
+
+| tile | from HBM, median (p10–p90) | from L2, median (p10–p90) |
+|---|---|---|
+| 8 rows, 1 KiB | 420 ns (399–561) | 172 ns (165–179) |
+| 16 rows, 2 KiB | 454 ns (411–614) | 177 ns (171–184) |
+| 32 rows, 4 KiB | 562 ns (434–630) | 185 ns (179–192) |
+| 64 rows, 8 KiB | 607 ns (518–644) | 203 ns (197–210) |
+| 128 rows, 16 KiB | 639 ns (557–672) | 238 ns (233–244) |
+| 256 rows, 32 KiB | 698 ns (641–735) | 313 ns (308–319) |
+
+One SM streaming from HBM through a ring of stages with one loader warp,
+every SM in turn (GB/s per SM, median; p10–p90 within ±3%):
+
+| tile \ stages | 1 | 2 | 4 | 6 |
+|---|---|---|---|---|
+| 1 KiB | 2.0 | 3.9 | 7.3 | 8.8 |
+| 2 KiB | 3.7 | 7.2 | 13.7 | 17.5 |
+| 4 KiB | 6.7 | 13.1 | 25.1 | 34.2 |
+| 8 KiB | 12.6 | 24.6 | 47.3 | 65.4 |
+| 16 KiB | 23.6 | 45.6 | 87.0 | 120.5 |
+| 32 KiB | 43.0 | 83.9 | 152.1 | 198.4 |
+
+The same with 4 stages per loader warp and 1, 2 or 4 loader warps:
+
+| tile \ loader warps | 1 | 2 | 4 |
+|---|---|---|---|
+| 2 KiB | 13.7 | 27.1 | 53.8 |
+| 8 KiB | 47.3 | 93.8 | 178.9 |
+
+Aggregate from HBM, every participating SM streaming its own slice of a
+4 GiB matrix (GB/s, median of 7):
+
+| SMs | 16 KiB × 4 stages | 32 KiB × 6 stages | 2 KiB × 6 stages | 2 KiB × 4 stages × 4 warps |
+|---|---|---|---|---|
+| 1 | 92.1 | 211.7 | 17.6 | 54.4 |
+| 2 | 181.4 | 421.5 | 35.1 | 107.3 |
+| 8 | 707.6 | 1,566.2 | 140.5 | 430.0 |
+| 32 | 2,177.1 | 3,118.9 | 555.4 | 1,538.3 |
+| 74 | 3,022.5 | 3,120.4 | 1,237.7 | 2,649.0 |
+| 132 | 3,182.6 (95% of peak) | 3,131.6 (93%) | 2,009.2 (60%) | 3,100.1 (92%) |
+
+The B200 conclusions carry over: one SM's throughput is set by the bytes it has
+in flight (2 KiB tiles: 3.7, 7.2, 13.7, 17.5 GB/s at 1, 2, 4, 6 stages), it does
+not matter whether they are split across stages or loader warps (13.7, 27.1,
+53.8 GB/s for 1, 2, 4 warps × 4 stages), and a decode task loading narrow tiles
+with a shallow ring (12 KiB in flight per SM) reaches 60% of HBM peak with all
+132 SMs, while 16 KiB × 4 stages reaches 95% and 32 KiB × 6 stages reaches 93% with only 32
+SMs. A tile from L2 lands in 172–313 ns, 2.2–3.0× sooner than from HBM at the
+same size (420–698 ns).
 
 ### What these say
 

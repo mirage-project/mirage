@@ -181,9 +181,32 @@ __global__ void runtime_poll_per_sm(unsigned long long *ready,
 }
 
 // ---------------------------------------------------------------------------
-// Device-scope fence, per SM: a relaxed store followed by __threadfence(),
-// minus the same loop without the fence.
+// Fence after a store, per SM: a relaxed store followed by the fence, minus
+// the same loop without the fence.
+//
+//   FENCE_GPU          __threadfence()
+//   FENCE_PROXY        fence.proxy.async.global
+//   FENCE_PROXY_GPU    fence.proxy.async.global, then __threadfence()
+//
+// The proxy fence orders generic-proxy accesses with async-proxy (TMA)
+// accesses to global memory. A hand-off whose two sides use different proxies
+// -- a generic store read by a TMA load, or a TMA store read by a generic
+// load -- needs it next to the release or acquire, so on such an edge it is
+// paid in addition to the device-scope fence; FENCE_PROXY_GPU is that pair.
 // ---------------------------------------------------------------------------
+enum FenceKind { FENCE_GPU = 0, FENCE_PROXY = 1, FENCE_PROXY_GPU = 2 };
+
+template <int KIND>
+__device__ __forceinline__ void fence_under_test() {
+  if (KIND == FENCE_PROXY || KIND == FENCE_PROXY_GPU) {
+    asm volatile("fence.proxy.async.global;" ::: "memory");
+  }
+  if (KIND == FENCE_GPU || KIND == FENCE_PROXY_GPU) {
+    __threadfence();
+  }
+}
+
+template <int KIND>
 __global__ void fence_per_sm(unsigned long long *x,
                              unsigned long long *ticket,
                              int iters,
@@ -204,7 +227,7 @@ __global__ void fence_per_sm(unsigned long long *x,
     t0 = clock64();
     for (int i = 0; i < iters; i++) {
       st_relaxed_gpu_u64(x, (unsigned long long)i);
-      __threadfence();
+      fence_under_test<KIND>();
     }
     t1 = clock64();
     out_store[blockIdx.x * R_SM + r] = store;
@@ -423,7 +446,9 @@ int main(int argc, char **argv) {
   allow_dynamic_smem(atomic_per_sm<1>, smem);
   allow_dynamic_smem(acquire_per_sm, smem);
   allow_dynamic_smem(runtime_poll_per_sm, smem);
-  allow_dynamic_smem(fence_per_sm, smem);
+  allow_dynamic_smem(fence_per_sm<FENCE_GPU>, smem);
+  allow_dynamic_smem(fence_per_sm<FENCE_PROXY>, smem);
+  allow_dynamic_smem(fence_per_sm<FENCE_PROXY_GPU>, smem);
   allow_dynamic_smem(acquire_under_load, smem);
   allow_dynamic_smem(atomic_contended, smem);
 
@@ -634,18 +659,36 @@ int main(int argc, char **argv) {
            }));
   }
 
-  // --- fence, marginal over a store-only baseline ---
+  // --- fences, marginal over a store-only baseline ---
   {
     PerAddr store;
     PerAddr fence = over_addresses(d_x, [&](unsigned long long *x) {
       ticketed();
-      fence_per_sm<<<nsm, 32, smem>>>(
-          x, d_ticket, ITERS, d_out, d_out2, d_smid);
+      fence_per_sm<FENCE_GPU>
+          <<<nsm, 32, smem>>>(x, d_ticket, ITERS, d_out, d_out2, d_smid);
       CHECK_LAUNCH();
       store.push_back(per_sm_medians(d_out2, d_smid, nsm, ghz));
       return per_sm_medians(d_out, d_smid, nsm, ghz);
     });
     finish("__threadfence() marginal", "threadfence_marginal_ns", fence);
+    finish("fence.proxy.async.global marginal",
+           "proxy_async_fence_marginal_ns",
+           over_addresses(d_x, [&](unsigned long long *x) {
+             ticketed();
+             fence_per_sm<FENCE_PROXY>
+                 <<<nsm, 32, smem>>>(x, d_ticket, ITERS, d_out, d_out2, d_smid);
+             CHECK_LAUNCH();
+             return per_sm_medians(d_out, d_smid, nsm, ghz);
+           }));
+    finish("proxy fence + __threadfence() marginal",
+           "proxy_async_fence_plus_threadfence_marginal_ns",
+           over_addresses(d_x, [&](unsigned long long *x) {
+             ticketed();
+             fence_per_sm<FENCE_PROXY_GPU>
+                 <<<nsm, 32, smem>>>(x, d_ticket, ITERS, d_out, d_out2, d_smid);
+             CHECK_LAUNCH();
+             return per_sm_medians(d_out, d_smid, nsm, ghz);
+           }));
     finish("st.relaxed.gpu.u64 (fence baseline)", "relaxed_store_ns", store);
   }
 
