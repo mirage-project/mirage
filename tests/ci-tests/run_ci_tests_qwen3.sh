@@ -4,6 +4,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export MIRAGE_HOME="${MIRAGE_HOME:-$ROOT}"
 
+echo "=== accelerator inventory ==="
+nvidia-smi -L || true
+nvidia-smi --query-gpu=name,uuid,memory.total,memory.free,driver_version --format=csv,noheader || true
+hostname || true
+id || true
+echo "=== end accelerator inventory ==="
+
 echo "MIRAGE_HOME=${MIRAGE_HOME}"
 echo "Running Torch baseline..."
 python "$ROOT/demo/qwen3/demo.py" --save-tokens
