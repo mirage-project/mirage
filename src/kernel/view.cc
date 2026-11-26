@@ -30,19 +30,13 @@ inline int64_t row_major_byte_stride(DTensor const &t, int dim) {
   return stride;
 }
 
-// Decide the view's per-element strides. For views with the SAME rank as
-// the parent (split / narrow / same-rank view) the view occupies a window
-// of the parent's memory using the parent's stride pattern — inherit it
-// element-for-element. For views with a DIFFERENT rank (reshape, e.g.
-// (B, H*D) -> (B, H, D)) we synthesize row-major strides from the view's
-// own dims; this is correct for any contiguous reshape of a contiguous
-// row-major parent and matches the natural element-flat ordering.
+// A slice inherits its parent's strides; a contiguous reshape recomputes
+// strides even when the rank stays the same, e.g. (1, 2048) -> (16, 128).
 //
 // Writes are made into v.stride[0..v.num_dims). Out-of-rank slots are
 // zero-initialized by the DTensor constructor and left alone here.
-void set_view_strides(DTensor &v, DTensor const &parent) {
-  bool inherit_parent_strides = (v.num_dims == parent.num_dims);
-  if (inherit_parent_strides) {
+void set_view_strides(DTensor &v, DTensor const &parent, bool reshape) {
+  if (!reshape) {
     for (int i = 0; i < v.num_dims; i++) {
       v.stride[i] = parent.stride[i];
     }
@@ -62,7 +56,8 @@ void set_view_strides(DTensor &v, DTensor const &parent) {
 // parent.base_guid and accumulates view_offset.
 DTensor make_view(DTensor const &parent,
                   std::vector<int> const &new_dims,
-                  int64_t additional_byte_offset) {
+                  int64_t additional_byte_offset,
+                  bool reshape = false) {
   DTensor v;
   v.data_type = parent.data_type;
   v.layout = parent.layout;
@@ -70,7 +65,7 @@ DTensor make_view(DTensor const &parent,
   for (int i = 0; i < v.num_dims; i++) {
     v.dim[i] = new_dims[i];
   }
-  set_view_strides(v, parent);
+  set_view_strides(v, parent, reshape);
   // Flatten multi-level views to the root storage. Non-virtual parents
   // (base_guid==0) become this view's base_guid; virtual parents pass their
   // base_guid through.
@@ -108,8 +103,21 @@ DTensor Graph::view(DTensor const &input, std::vector<int> const &new_shape) {
     throw std::runtime_error(
         "Graph::view: total element count must match the input");
   }
-  // Pure reshape — no additional byte offset within the parent.
-  return make_view(input, new_shape, /*additional_byte_offset=*/0);
+  bool same_shape = static_cast<int>(new_shape.size()) == input.num_dims;
+  for (int i = 0; same_shape && i < input.num_dims; ++i)
+    same_shape = new_shape[i] == input.dim[i];
+  // An unchanged shape can retain a strided window. Other reshapes currently
+  // require contiguous row-major storage; silently flattening holes is unsafe.
+  if (!same_shape) {
+    int64_t expected_stride = 1;
+    for (int i = input.num_dims - 1; i >= 0; --i) {
+      if (input.dim[i] != 1 && input.stride[i] != expected_stride)
+        throw std::runtime_error("Graph::view: reshape requires contiguous input");
+      expected_stride *= input.dim[i];
+    }
+  }
+  return make_view(input, new_shape, /*additional_byte_offset=*/0,
+                   /*reshape=*/!same_shape);
 }
 
 DTensor *Graph::view(DTensor const *input, std::vector<int> const &new_shape) {

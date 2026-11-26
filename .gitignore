@@ -103,3 +103,6 @@ benchmark/microbench/sync_primitives
 benchmark/microbench/tma_bandwidth
 benchmark/microbench/.build_flags
 benchmark/microbench/*.json
+
+# Local Qwen adaptation test environment
+.venv-qwen38/

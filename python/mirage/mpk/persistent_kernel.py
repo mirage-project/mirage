@@ -305,7 +305,6 @@ def get_compile_command(
         "-shared",
         _detect_cxx_standard(),
         "-rdc=false" if not use_nvshmem else "-rdc=true",
-        "-use_fast_math",
         "-lcuda",
         "-lcudart",
         "-lstdc++fs",
@@ -314,7 +313,26 @@ def get_compile_command(
         "-o",
         py_so_path,
     ]
+    if mpk.use_fast_math:
+        flags.append("-use_fast_math")
     flags = flags + [f"-DMPK_TARGET_CC={target_cc}", "-DMIRAGE_BACKEND_USE_CUDA"]
+    # Experiment-only specialization for a graph containing only GDN delta
+    # tasks. Keep the production worker's shared-memory budget unchanged.
+    if os.environ.get("MPK_EXPERIMENT_GDN_ONLY") == "1":
+        if mpk.num_workers not in (128, 256, 384):
+            raise ValueError("GDN-only worker experiment requires 128, 256, or 384 workers")
+        default_gdn_optimized = getattr(mpk, "qwen_gdn_optimized", False)
+        gdn_cache_enabled = os.environ.get(
+            "MPK_QWEN38_B8_GDN_CACHE_SMEM", "1" if default_gdn_optimized else "0") == "1"
+        gdn_dual_lane_enabled = os.environ.get(
+            "MPK_QWEN38_GDN_DUAL_LANE", "1" if default_gdn_optimized else "0") == "1"
+        gdn_cache_bytes = 128 * 128 * 4 if gdn_cache_enabled else 0
+        gdn_dual_lane_bytes = 9 * 128 * 4 if gdn_dual_lane_enabled else 0
+        flags += ["-DMPK_EXPERIMENT_GDN_ONLY",
+                  f"-DMPK_EXPERIMENT_WORKER_DYNAMIC_SMEM_BYTES={gdn_cache_bytes + gdn_dual_lane_bytes}",
+                  "-DMPK_EXPERIMENT_MAX_WORKERS=384"]
+        if mpk.num_workers > 256:
+            flags.append("-DMPK_EXPERIMENT_WIDE_PROFILER")
     if test_mode:
         flags = flags + ["-DMPK_TEST_MODE"]
     if mpk.mode == "offline":
@@ -383,6 +401,47 @@ def get_compile_command(
     
     if profiling:
         flags = flags + ["-DMPK_ENABLE_PROFILING"]
+        if os.environ.get("MPK_PROFILE_WORKERS_ONLY") == "1":
+            flags.append("-DMPK_PROFILE_WORKERS_ONLY")
+    if os.environ.get("MPK_QWEN38_B8_GDN_UNROLL4") == "1":
+        flags.append("-DMPK_QWEN38_B8_GDN_UNROLL4")
+    default_gdn_optimized = getattr(mpk, "qwen_gdn_optimized", False)
+    if os.environ.get("MPK_QWEN38_B8_GDN_CACHE_SMEM",
+                      "1" if default_gdn_optimized else "0") == "1":
+        if target_cc != 100 or mpk.num_workers != 128:
+            raise ValueError("GDN shared-memory cache experiment requires B200 and 128 workers")
+        flags.append("-DMPK_QWEN38_B8_GDN_CACHE_SMEM")
+    if os.environ.get("MPK_QWEN38_GDN_DUAL_LANE",
+                      "1" if default_gdn_optimized else "0") == "1":
+        if target_cc != 100 or mpk.num_workers != 128:
+            raise ValueError("GDN dual-lane experiment requires B200 and 128 workers")
+        flags.append("-DMPK_QWEN38_GDN_DUAL_LANE")
+    if os.environ.get("MPK_QWEN_PRODUCER_PROXY_FENCE_DIAGNOSTIC") == "1":
+        flags.append("-DMPK_QWEN_PRODUCER_PROXY_FENCE_DIAGNOSTIC")
+    if os.environ.get("MPK_QWEN_SCOPED_PRODUCER_FENCE_DIAGNOSTIC") == "1":
+        flags.append("-DMPK_QWEN_SCOPED_PRODUCER_FENCE_DIAGNOSTIC")
+    if os.environ.get("MPK_QWEN_TENSORMAP_ACQUIRE_DIAGNOSTIC") == "1":
+        flags.append("-DMPK_QWEN_TENSORMAP_ACQUIRE_DIAGNOSTIC")
+    if os.environ.get("MPK_QWEN_LINEAR_BLOCKING_BARRIER_DIAGNOSTIC") == "1":
+        flags.append("-DMPK_QWEN_LINEAR_BLOCKING_BARRIER_DIAGNOSTIC")
+    if os.environ.get("MPK_QWEN_LINEAR_SINGLE_AB_STAGE_DIAGNOSTIC") == "1":
+        flags.append("-DMPK_QWEN_LINEAR_SINGLE_AB_STAGE_DIAGNOSTIC")
+    if os.environ.get("MPK_QWEN_LINEAR_SINGLE_ACC_STAGE_DIAGNOSTIC") == "1":
+        flags.append("-DMPK_QWEN_LINEAR_SINGLE_ACC_STAGE_DIAGNOSTIC")
+    if os.environ.get("MPK_QWEN_LINEAR_NAN_TRACE_DIAGNOSTIC") == "1":
+        flags.append("-DMPK_QWEN_LINEAR_NAN_TRACE_DIAGNOSTIC")
+    if os.environ.get("MPK_QWEN_LINEAR_RETRY_NONFINITE_DIAGNOSTIC") == "1":
+        flags.append("-DMPK_QWEN_LINEAR_RETRY_NONFINITE_DIAGNOSTIC")
+    if os.environ.get("MPK_QWEN_LINEAR_GLOBAL_RETRY_DIAGNOSTIC") == "1":
+        flags.append("-DMPK_QWEN_LINEAR_GLOBAL_RETRY_DIAGNOSTIC")
+    if getattr(mpk, "qwen_linear_output_guard", False):
+        flags.append("-DMPK_QWEN_LINEAR_OUTPUT_GUARD")
+        if os.environ.get("MPK_QWEN_LINEAR_GUARD_TRACE") == "1":
+            flags.append("-DMPK_QWEN_LINEAR_GUARD_TRACE")
+    if os.environ.get("MPK_QWEN_B16_SIMT_LINEAR_DIAGNOSTIC") == "1":
+        flags.append("-DMPK_QWEN_B16_SIMT_LINEAR_DIAGNOSTIC")
+    if os.environ.get("MPK_QWEN36_ROUTING_DIAGNOSTIC") == "1":
+        flags.append("-DMPK_QWEN36_ROUTING_DIAGNOSTIC")
 
     return common_cmd + specific_cmd + flags
 
@@ -441,10 +500,12 @@ class PersistentKernel:
         kv_groups: list = None,
         page_size: int = None,
         max_tokens_per_request: Optional[int] = None,
+        use_fast_math: bool = True,
     ):
         self.__finalized__ = False
         self._is_compiled = False
         self.test_mode = test_mode
+        self.use_fast_math = use_fast_math
         self.do_sample = do_sample
         self.temperature = temperature
         self.top_p = top_p
@@ -702,6 +763,7 @@ class PersistentKernel:
             "world_size": self.world_size,
             "rank": self.mpi_rank,
             "cuda_cc": self.target_cc,
+            "use_fast_math": self.use_fast_math,
             "tensor_names": sorted(self._model_tensors.keys()),
         }
         with open(path, "w") as f:
@@ -713,6 +775,11 @@ class PersistentKernel:
             saved = json.load(f)
         
         errors = []
+        # Older kernels were always compiled with -use_fast_math.
+        if saved.get("use_fast_math", True) != self.use_fast_math:
+            errors.append(
+                f"use_fast_math: saved={saved.get('use_fast_math', True)}, "
+                f"current={self.use_fast_math}")
         checks = [
             ("mode", self.mode),
             ("max_seq_length", self.max_seq_length),
@@ -829,6 +896,7 @@ class PersistentKernel:
 
     def view(self, input: DTensor, new_shape: list) -> DTensor:
         """Reshape into a new shape that has the same total element count.
+        Shape-changing views require contiguous row-major storage.
         Returns a single virtual DTensor."""
         return self.kn_graph.view(input, list(new_shape))
 
@@ -1979,6 +2047,7 @@ class PersistentKernel:
         output: tuple[DTensor, DTensor, DTensor],
         grid_dim: tuple,
         block_dim: tuple,
+        round_weights_to_bf16: bool = False,
     ):
         # Currently assume that input/output
         assert input.num_dims == 2  # (batch_size, num_experts)
@@ -1994,7 +2063,8 @@ class PersistentKernel:
         tb_graph.new_input(moe_masks, (-1, -1, -1), -1, True)
         self.kn_graph.customized([input, moe_topk_weight, moe_routing_indices, moe_masks], tb_graph)
 
-        self.kn_graph.register_task(tb_graph, "moe_topk_softmax_sm100")
+        self.kn_graph.register_task(tb_graph, "moe_topk_softmax_sm100",
+                                    [int(round_weights_to_bf16)] if round_weights_to_bf16 else [])
 
     def moe_topk_sigmoid_routing_layer(
         self,
@@ -2366,6 +2436,17 @@ class PersistentKernel:
         self.kn_graph.register_task(
             tb_graph, "moe_mul_sum_add_sm100", [enable_residual])
 
+    def qwen36_moe_sum_layer(self, expert_output, routing_weights,
+                             routing_indices, shared_output, output):
+        """HF BF16 accumulation order for Qwen3.6's routed and shared experts."""
+        assert self.target_cc == 100
+        tb_graph = TBGraph(CyTBGraph((1, 1, 1), (256, 1, 1), 1, 64))
+        tensors = [expert_output, routing_weights, routing_indices, shared_output, output]
+        for tensor in tensors:
+            tb_graph.new_input(tensor, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(tensors, tb_graph)
+        self.kn_graph.register_task(tb_graph, "qwen36_moe_sum")
+
     def splitk_linear_layer(
         self,
         input: DTensor,
@@ -2438,7 +2519,11 @@ class PersistentKernel:
             self.kn_graph.register_task(
                 tb_graph, "linear_with_bias_sm100", [1, 1])
         elif self.target_cc >= 100 and self.target_cc < 120:
-            self.kn_graph.register_task(tb_graph, "linear_sm100")
+            if (input.dim(0) == 16 and cols_per_task >= 128 and
+                    os.environ.get("MPK_QWEN_B16_SIMT_LINEAR_DIAGNOSTIC") == "1"):
+                self.kn_graph.register_task(tb_graph, "linear")
+            else:
+                self.kn_graph.register_task(tb_graph, "linear_sm100")
         elif self.target_cc >= 90 and self.target_cc < 100:
             if weight.dim(0) // grid_dim[0] <= 64:
                 self.kn_graph.register_task(tb_graph, "linear_swapAB_hopper")
@@ -2524,9 +2609,14 @@ class PersistentKernel:
         # Currently assume that input/output
         assert input.num_dims == 2 # (batch_size, 2 * intermediate_size)
         assert output.num_dims == 2 # (batch_size, intermediate_size)
+        row_partition = grid_dim[1] > 1
+        if row_partition and (grid_dim[0] != 1 or grid_dim[1] != input.dim(0)
+                              or grid_dim[1] != output.dim(0)):
+            raise ValueError("SiLU row partition requires one task per batch row")
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input, (1, -1, -1), 1, True)
-        tb_graph.new_input(output, (1, -1, -1), 1, True)
+        mapping = (-1, 0, -1) if row_partition else (1, -1, -1)
+        tb_graph.new_input(input, mapping, 1, True)
+        tb_graph.new_input(output, mapping, 1, True)
         self.kn_graph.customized([input, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "silu_mul" if self.target_cc == 90 else "silu_mul")
 
@@ -3225,6 +3315,14 @@ class PersistentKernel:
             tempdir = tempdir_obj.name
         os.makedirs(tempdir, exist_ok=True)
         results = self.kn_graph.generate_task_graph(num_gpus=self.world_size, my_gpu_id=self.mpi_rank)
+        validator = getattr(self, "_task_graph_validator", None)
+        if validator is not None:
+            validator(results["json_file"])
+        if os.environ.get("MPK_EXPERIMENT_GDN_ONLY") == "1":
+            graph = json.loads(results["json_file"])
+            kinds = [task["task_type"] for task in graph["all_tasks"]]
+            if sorted(set(kinds)) != [0, 10, 552] or kinds.count(552) != 384:
+                raise ValueError("Zero-smem worker specialization requires exactly 384 GDN delta tasks")
 
         cuda_code_path = os.path.join(tempdir, "test.cu")
         so_path = os.path.join(tempdir, "test" + sysconfig.get_config_var("EXT_SUFFIX"))
@@ -3374,6 +3472,7 @@ class PersistentKernel:
         spec.loader.exec_module(mod)
         self.init_func = getattr(mod, "init_func")
         self.launch_func = getattr(mod, "launch_func")
+        self.init_request_func = getattr(mod, "init_request_func")
         self.wait_func = getattr(mod, "wait_func")
         self.finalize_func = getattr(mod, "finalize_func")
         self.load_i32_acquire = getattr(mod, "load_i32_acquire")

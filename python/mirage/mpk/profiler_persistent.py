@@ -100,6 +100,19 @@ event_name_list = {
     298: "TASK_SM100_TASK_END",
     301: "TASK_NVSHMEM_ALLGATHER_STRIDED_PUT",
     302: "TASK_NVSHMEM_TILE_ALLREDUCE",
+    310: "TASK_QWEN35_NORM",
+    311: "TASK_QWEN35_CONV",
+    312: "TASK_QWEN35_DELTA",
+    313: "TASK_QWEN35_QK_ROPE",
+    314: "TASK_QWEN35_KV_STORE",
+    315: "TASK_QWEN35_ATTENTION",
+    316: "TASK_QWEN35_EMBED",
+    317: "TASK_QWEN35_ARGMAX",
+    318: "TASK_QWEN35_DOWN",
+    319: "TASK_QWEN35_PREFILL",
+    320: "TASK_QWEN38_RUNTIME_POSITION",
+    321: "TASK_QWEN36_SHARED_GATE",
+    322: "TASK_QWEN36_MOE_SUM",
 }
 
 
@@ -110,8 +123,11 @@ class EventType(Enum):
 
 
 def decode_tag(tag, num_blocks, num_groups):
-    event_no = tag >> 19
-    block_group_tag = (tag >> 11) & 0xFF
+    # The experimental GDN-only 384-worker graph uses nine block bits;
+    # existing <=256-block compiled graphs retain their eight-bit format.
+    block_bits = 9 if num_blocks > 256 else 8
+    event_no = tag >> (11 + block_bits)
+    block_group_tag = (tag >> 11) & ((1 << block_bits) - 1)
     event_idx = (tag >> 2) & 0x1FF
     event_type = tag & 0x3
     return (
@@ -230,12 +246,14 @@ def export_to_csv(
             begin_no, begin_ts = pending.pop(key)
             duration = (timestamp - begin_ts) & 0xFFFFFFFF
             rows.append(
-                (event_idx, name, block_idx, group_idx, begin_no,
+                (event_idx + 240 if 310 <= event_idx <= 322 else event_idx,
+                 name, block_idx, group_idx, begin_no,
                  begin_ts, timestamp, duration)
             )
         elif event_type == EventType.kInstant.value:
             rows.append(
-                (event_idx, name, block_idx, group_idx, event_no,
+                (event_idx + 240 if 310 <= event_idx <= 322 else event_idx,
+                 name, block_idx, group_idx, event_no,
                  timestamp, timestamp, 0)
             )
 

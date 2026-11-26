@@ -40,6 +40,9 @@
 #endif
 #endif
 #include <map>
+#include <fstream>
+#include <cstdlib>
+#include <cstdint>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -234,6 +237,24 @@ __global__ void prepare_kernel(RuntimeConfig config,
     config.sched_queue_next_free_event_id[0] = 1;
     config.sched_queues[0][0] = end_of_task_graph_event_pos;
     config.sched_queue_last_ready_event_id[0] = 1;
+  }
+}
+
+// The fixed B8 graph is topologically ordered. Populate each worker's queue
+// from its immutable plan, then run the ordinary task executor. A zero task
+// id terminates the worker after its final model task.
+__global__ void prepare_static_worker_queues(RuntimeConfig config) {
+  int worker = blockIdx.x;
+  int begin = config.static_schedule_offsets[worker];
+  int count = config.static_schedule_offsets[worker + 1] - begin;
+  for (int i = threadIdx.x; i < count; i += blockDim.x) {
+    TaskId position = config.static_schedule_tasks[begin + i];
+    config.worker_queues[worker][i] = compute_task_id(1, position);
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    config.worker_queues[worker][count] = 0;
+    config.worker_queue_last_ready_task_id[worker] = count + 1;
   }
 }
 
@@ -958,6 +979,17 @@ __device__ __forceinline__ void persistent_checker(RuntimeConfig config) {
   // assert(blockDim.x >= 128);
 }
 
+#ifdef MPK_ENABLE_PROFILING
+// The profiler tag has only nine event-id bits.  Qwen task types start at
+// 550, so encode them in an unused compact range and restore their ids when
+// exporting CSV records.  310..322 are unused task ids in this runtime.
+__device__ __forceinline__ int profiler_task_type(TaskType type) {
+  return (type >= TASK_QWEN35_NORM && type <= TASK_QWEN36_MOE_SUM)
+             ? static_cast<int>(type) - 240
+             : static_cast<int>(type);
+}
+#endif
+
 __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
   // Make sure overall smem usage here do not exceed 3KB
   // last_task_pos: 2 * 8 = 16 B
@@ -986,17 +1018,18 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
 
 #endif
   int const worker_id = blockIdx.x;
-  worker_queues[0] = config.worker_queues[worker_id];
-  worker_queue_ids[0] = worker_id;
   int num_worker_queues = 1;
   if (config.num_gpus > 1) {
-    worker_queues[num_worker_queues] =
-        config.worker_queues[worker_id + config.num_workers];
-    worker_queue_ids[num_worker_queues] = worker_id + config.num_workers;
     num_worker_queues++;
   }
 
   if (threadIdx.x == 0) {
+    worker_queues[0] = config.worker_queues[worker_id];
+    worker_queue_ids[0] = worker_id;
+    if (num_worker_queues > 1) {
+      worker_queues[1] = config.worker_queues[worker_id + config.num_workers];
+      worker_queue_ids[1] = worker_id + config.num_workers;
+    }
     for (int i = 0; i < 2; i++) {
       next_task_pos[i] = 0;
     }
@@ -1005,6 +1038,7 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
     }
     // num_loaded_tasks = 0;
   }
+  __syncthreads();
 
   int queue_pos = 0, queue_len = 0;
 #ifdef MPK_ENABLE_PROFILING
@@ -1117,7 +1151,7 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
 
 #ifdef MPK_ENABLE_PROFILING
     if (task_desc->task_type != TASK_TERMINATE) {
-      PROFILER_EVENT_START(task_desc->task_type, task_counter);
+      PROFILER_EVENT_START(profiler_task_type(task_desc->task_type), task_counter);
     }
 #endif
 
@@ -1148,11 +1182,22 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
 #endif
       _execute_task(task_desc, config);
     }
+#ifdef MPK_QWEN_PRODUCER_PROXY_FENCE_DIAGNOSTIC
+    // Diagnostic: bridge generic stores from each producer thread to TMA
+    // consumers before thread 0 publishes the task-completion event.
+    asm volatile("fence.proxy.async.global;" ::: "memory");
+#elif defined(MPK_QWEN_SCOPED_PRODUCER_FENCE_DIAGNOSTIC)
+    if ((task_desc->task_type >= TASK_QWEN35_NORM &&
+         task_desc->task_type <= TASK_QWEN36_MOE_SUM) ||
+        task_desc->task_type == TASK_SILU_MUL) {
+      asm volatile("fence.proxy.async.global;" ::: "memory");
+    }
+#endif
     __syncthreads();
 
 #ifdef MPK_ENABLE_PROFILING
     if (task_desc->task_type != TASK_TERMINATE) {
-      PROFILER_EVENT_END(task_desc->task_type, task_counter++);
+      PROFILER_EVENT_END(profiler_task_type(task_desc->task_type), task_counter++);
     }
 #endif
 
@@ -1199,7 +1244,8 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
           // Add the event to the schedule_queue
           // Note that events launching massive tasks are scheduled
           // to the global sched_queue
-          if (event_desc.event_type == EVENT_EMPTY) {
+          if (config.static_schedule_enabled ||
+              event_desc.event_type == EVENT_EMPTY) {
             // Do nothing for empty event
           } else {
             bool use_bcast_queue = false;
@@ -1264,7 +1310,7 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
   int const warp_id = threadIdx.x / 32;
   // CANNOT use syncthreads below
 
-#ifdef MPK_ENABLE_PROFILING
+#if defined(MPK_ENABLE_PROFILING) && !defined(MPK_PROFILE_WORKERS_ONLY)
   PROFILER_CLOSURE_PARAMS_DECL;
 #endif
 
@@ -1280,7 +1326,7 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
     sched_queue_ids[0] = sched_id;
     unsigned long long int my_first_worker, my_last_worker;
 
-#ifdef MPK_ENABLE_PROFILING
+#if defined(MPK_ENABLE_PROFILING) && !defined(MPK_PROFILE_WORKERS_ONLY)
     // Up to 4 scheduler warps share one block but the profiler has one
     // slot per block (num_groups=1).  Only warp 0 writes so events from
     // different warps don't interleave.
@@ -1383,7 +1429,7 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
 #ifdef MPK_ENABLE_VERBOSE
         printf("[SCHD] END_OF_TASK_GRAPH\n");
 #endif
-#ifdef MPK_ENABLE_PROFILING
+#if defined(MPK_ENABLE_PROFILING) && !defined(MPK_PROFILE_WORKERS_ONLY)
         PROFILER_EVENT_START(TASK_SCHD_PREPARE_BATCH, sched_profiling_cnt);
 #endif
 #ifdef MODE_ONLINE_NOTOKEN
@@ -1392,12 +1438,12 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
         if (!prepare_next_batch(config))
 #endif
         {
-#ifdef MPK_ENABLE_PROFILING
+#if defined(MPK_ENABLE_PROFILING) && !defined(MPK_PROFILE_WORKERS_ONLY)
           PROFILER_EVENT_END(TASK_SCHD_PREPARE_BATCH, sched_profiling_cnt++);
 #endif
           terminate_schedulers(config);
         } else {
-#ifdef MPK_ENABLE_PROFILING
+#if defined(MPK_ENABLE_PROFILING) && !defined(MPK_PROFILE_WORKERS_ONLY)
           PROFILER_EVENT_END(TASK_SCHD_PREPARE_BATCH, sched_profiling_cnt++);
 #endif
           // Launch task 1 (begin_task_graph) for the next iteration
@@ -1542,6 +1588,20 @@ __global__ __launch_bounds__(WORKER_NUM_THREADS,
   execute_worker(config);
 }
 
+#ifdef MODE_OFFLINE
+// The fixed graph still has tasks (for example SiLU) that read the request
+// scheduler's qo_indptr metadata.  Perform the same one-batch preparation
+// before releasing the precomputed task queues to workers.
+__global__ void prepare_static_fixed_batch(RuntimeConfig config) {
+  if (blockIdx.x == 0 && threadIdx.x == 0) {
+    if (!prepare_next_batch(config)) {
+      printf("MPK static schedule expected one ready fixed batch\n");
+      __trap();
+    }
+  }
+}
+#endif
+
 __global__ void scheduler_kernel(RuntimeConfig config) {
   scheduler_checker(config);
   execute_scheduler(config, 0);
@@ -1609,6 +1669,89 @@ extern "C" void init_request_resources() {
   init_kernel<<<dim3(1, 1, 1), dim3(INIT_NUM_THREADS, 1, 1)>>>(
       global_runtime_config);
   cudaStreamSynchronize(NULL);
+}
+
+static uint64_t static_schedule_graph_signature(
+    std::vector<FullTaskDesc> const &tasks) {
+  uint64_t value = 1469598103934665603ull;
+  for (auto const &task : tasks) {
+    value = (value ^ static_cast<uint64_t>(task.task_type)) *
+            1099511628211ull;
+    value = (value ^ static_cast<uint64_t>(task.dependent_event)) *
+            1099511628211ull;
+    value = (value ^ static_cast<uint64_t>(task.trigger_event)) *
+            1099511628211ull;
+  }
+  return value;
+}
+
+static void load_static_worker_schedule(
+    RuntimeConfig &config, std::vector<FullTaskDesc> const &tasks,
+    std::vector<EventDesc> const &events,
+    std::vector<TaskId> const &first_tasks) {
+  config.static_schedule_enabled = false;
+  config.static_schedule_tasks = nullptr;
+  config.static_schedule_offsets = nullptr;
+  char const *path = std::getenv("MPK_STATIC_WORKER_PLAN");
+  if (path == nullptr || path[0] == '\0') return;
+#ifndef MPK_TEST_MODE
+  fprintf(stderr, "MPK static worker schedule requires test_mode\n");
+  abort();
+#endif
+  if (config.num_gpus != 1 || events.size() < 2 ||
+      events[1].event_type != EVENT_LAUNCH_DEPENDENT_TASKS ||
+      events[1].first_task_id != 2 ||
+      events[1].last_task_id != tasks.size() ||
+      first_tasks.size() != 8) {
+    fprintf(stderr, "MPK static worker schedule requires a complete fixed B8 graph\n");
+    abort();
+  }
+  std::ifstream input(path);
+  std::string magic;
+  size_t workers = 0, task_count = 0;
+  uint64_t signature = 0;
+  if (!(input >> magic >> workers >> task_count >> signature) ||
+      magic != "MPK_STATIC_WORKERS_V1" ||
+      workers != static_cast<size_t>(config.num_workers) ||
+      task_count != tasks.size() ||
+      signature != static_schedule_graph_signature(tasks)) {
+    fprintf(stderr, "MPK static worker schedule does not match the task graph: %s\n", path);
+    abort();
+  }
+  std::vector<int> offsets(workers + 1, 0);
+  std::vector<TaskId> ids;
+  ids.reserve(tasks.size() - 2);
+  std::vector<uint8_t> seen(tasks.size(), 0);
+  for (size_t worker = 0; worker < workers; worker++) {
+    size_t count = 0;
+    if (!(input >> count) || count + 1 > config.per_worker_queue_len) {
+      fprintf(stderr, "MPK static worker schedule has an invalid worker list\n");
+      abort();
+    }
+    TaskId previous = 1;
+    for (size_t j = 0; j < count; j++) {
+      TaskId id = 0;
+      if (!(input >> id) || id <= previous || id >= tasks.size() || seen[id]) {
+        fprintf(stderr, "MPK static worker schedule has an invalid task id\n");
+        abort();
+      }
+      ids.push_back(id);
+      seen[id] = 1;
+      previous = id;
+    }
+    offsets[worker + 1] = static_cast<int>(ids.size());
+  }
+  if (ids.size() != tasks.size() - 2) {
+    fprintf(stderr, "MPK static worker schedule does not cover all tasks\n");
+    abort();
+  }
+  config.static_schedule_tasks = gpu_malloc<TaskId>(ids.size() * sizeof(TaskId));
+  config.static_schedule_offsets = gpu_malloc<int>(offsets.size() * sizeof(int));
+  cudaMemcpy(config.static_schedule_tasks, ids.data(), ids.size() * sizeof(TaskId),
+             cudaMemcpyHostToDevice);
+  cudaMemcpy(config.static_schedule_offsets, offsets.data(), offsets.size() * sizeof(int),
+             cudaMemcpyHostToDevice);
+  config.static_schedule_enabled = true;
 }
 
 extern "C" void
@@ -1803,6 +1946,8 @@ extern "C" void
   std::vector<TaskId> first_tasks;
   _init_persistent_kernel(
       all_fulltasks, all_events, first_tasks, npes, mype, global_model_tensors);
+  load_static_worker_schedule(global_runtime_config, all_fulltasks, all_events,
+                              first_tasks);
   std::vector<TaskDesc> all_tasks;
   for (auto const &ft : all_fulltasks) {
     TaskDesc task_desc(ft);
@@ -1969,6 +2114,15 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
                      0 /*smem*/,
                      default_stream>>>(global_runtime_config,
                                        end_of_task_graph_event_pos);
+    if (global_runtime_config.static_schedule_enabled) {
+#ifdef MODE_OFFLINE
+      prepare_static_fixed_batch<<<1, 1, 0, default_stream>>>(
+          global_runtime_config);
+#endif
+      prepare_static_worker_queues<<<dim3(global_runtime_config.num_workers, 1, 1),
+                                     dim3(128, 1, 1), 0, default_stream>>>(
+          global_runtime_config);
+    }
     // cudaStreamSynchronize(NULL);
     cudaEventRecord(global_runtime_config.prepare_done_event, default_stream);
     // cudaDeviceSynchronize();
@@ -1978,6 +2132,21 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
   }
   int num_schedulers = global_runtime_config.num_local_schedulers +
                        global_runtime_config.num_remote_schedulers;
+  if (global_runtime_config.static_schedule_enabled) {
+    cudaStreamWaitEvent(global_runtime_config.worker_stream,
+                        global_runtime_config.prepare_done_event, 0);
+    worker_kernel<<<dim3(global_runtime_config.num_workers, 1, 1),
+                    dim3(WORKER_NUM_THREADS, 1, 1),
+                    MAX_DYNAMIC_SHARED_MEMORY_SIZE,
+                    global_runtime_config.worker_stream>>>(global_runtime_config);
+#ifdef MODE_OFFLINE
+    cudaEventRecord(global_runtime_config.worker_done_event,
+                    global_runtime_config.worker_stream);
+    cudaStreamWaitEvent(default_stream,
+                        global_runtime_config.worker_done_event, 0);
+#endif
+    return;
+  }
   if (global_runtime_config.split_worker_scheduler) {
     printf("worker kernel & scheduler kernel\n");
     printf("smem size: %d\n", MAX_DYNAMIC_SHARED_MEMORY_SIZE);
@@ -2052,12 +2221,17 @@ extern "C" cudaError_t wait_persistent_kernel() {
   }
   cudaError_t worker_err =
       cudaStreamSynchronize(global_runtime_config.worker_stream);
+  if (global_runtime_config.static_schedule_enabled) return worker_err;
   cudaError_t scheduler_err =
       cudaStreamSynchronize(global_runtime_config.scheduler_stream);
   return worker_err != cudaSuccess ? worker_err : scheduler_err;
 }
 
 extern "C" void finalize_persistent_kernel() {
+  if (global_runtime_config.static_schedule_enabled) {
+    gpu_free(global_runtime_config.static_schedule_tasks);
+    gpu_free(global_runtime_config.static_schedule_offsets);
+  }
   gpu_free(global_runtime_config.worker_queue_last_ready_task_id);
   gpu_free(global_runtime_config.sched_queue_last_ready_event_id);
   gpu_free(global_runtime_config.sched_queue_next_free_event_id);

@@ -372,6 +372,79 @@ class StaticMegakernel(PersistentKernel):
                        counters={"slots": 0, "add": N // 128, "store": 1, "store_bf16": 1}[combine], map_slots=map_slots,
                        buf_slots=[] if skip_seq is None else [self._tensor_slot(skip_seq[0])])
 
+    def qwen_gdn_conv_layer(self, qkvz: DTensor, weight: DTensor, state: DTensor,
+                            slots: DTensor, output: DTensor):
+        """B8 Qwen3.8 decode Conv1D/SiLU on SGLang's indexed conv cache.
+
+        qkvz is the [T, 16384] BF16 projection; only its first 10240 columns
+        enter the convolution.  The cache is [slots, 10240, 3] and slot zero is
+        reserved for padding.  x selects a 256-channel tile, y a request.
+        """
+        T = self._tokens(qkvz.dim(0))
+        assert T == 8 and qkvz.num_dims == 2 and qkvz.dim(1) == 16384
+        assert weight.num_dims == 2 and (weight.dim(0), weight.dim(1)) == (10240, 4)
+        assert state.num_dims == 3 and (state.dim(1), state.dim(2)) == (10240, 3)
+        assert slots.num_dims == 1 and slots.dim(0) == T
+        assert output.num_dims == 2 and (output.dim(0), output.dim(1)) == (T, 10240)
+        self._dtypes("qwen_gdn_conv", qkvz=(qkvz, bfloat16), weight=(weight, bfloat16),
+                     state=(state, bfloat16), slots=(slots, int32), output=(output, bfloat16))
+        from .compiler import graph_nodes, producer_of
+        direct_qkvz = producer_of(qkvz, graph_nodes(self)) is None
+        self._add_node("qwen_gdn_conv", (40, T, 1), (256, 1, 1),
+                       [qkvz, weight, state, slots, output],
+                       [(-1, -1, -1), (0, -1, -1), (-1, -1, -1), (-1, 0, -1), (1, 0, -1)],
+                       [], out_buffer=lambda n: (T * 10240 * 2, -1, False), counters=T,
+                       buf_slots=[self._tensor_slot(t) for t in (weight, state, slots)] +
+                                 ([self._tensor_slot(qkvz)] if direct_qkvz else []))
+
+    def qwen_gdn_delta_layer(self, conv: DTensor, qkvz: DTensor, ab: DTensor,
+                             parameters: DTensor, norm_weight: DTensor,
+                             state: DTensor, slots: DTensor, output: DTensor):
+        """B8 grouped GDN recurrence on SGLang's [slot, head, value, key] cache.
+
+        AB is either the graph's padded [A(48), B(48), zero(32)] projection
+        or SGLang's contiguous [B(48), A(48)] projection.  x selects a value
+        head, y a request.
+        """
+        T = self._tokens(conv.dim(0))
+        assert T == 8 and conv.num_dims == 2 and conv.dim(1) == 10240
+        assert qkvz.num_dims == 2 and (qkvz.dim(0), qkvz.dim(1)) == (T, 16384)
+        assert ab.num_dims == 2 and ab.dim(0) == T and ab.dim(1) in (96, 128)
+        assert parameters.num_dims == 2 and (parameters.dim(0), parameters.dim(1)) == (2, 48)
+        assert norm_weight.num_dims == 1 and norm_weight.dim(0) == 128
+        assert state.num_dims == 4 and tuple(state.dim(i) for i in range(1, 4)) == (48, 128, 128)
+        assert slots.num_dims == 1 and slots.dim(0) == T
+        assert output.num_dims == 2 and (output.dim(0), output.dim(1)) == (T, 6144)
+        if norm_weight.dtype not in (bfloat16, float32):
+            raise ValueError("qwen_gdn_delta: norm_weight must be BF16 or FP32")
+        self._dtypes("qwen_gdn_delta", conv=(conv, bfloat16), qkvz=(qkvz, bfloat16),
+                     ab=(ab, bfloat16), parameters=(parameters, float32),
+                     state=(state, float32),
+                     slots=(slots, int32), output=(output, bfloat16))
+        from .compiler import graph_nodes, producer_of
+        nodes = graph_nodes(self)
+        direct_qkvz = producer_of(qkvz, nodes) is None
+        direct_ab = producer_of(ab, nodes) is None
+        self._add_node("qwen_gdn_delta", (48, T, 1), (256, 1, 1),
+                       [conv, qkvz, ab, parameters, norm_weight, state, slots, output],
+                       [(-1, 0, -1), (-1, 0, -1), (-1, 0, -1), (1, -1, -1),
+                        (-1, -1, -1), (-1, -1, -1), (-1, 0, -1), (1, 0, -1)],
+                       [1 if norm_weight.dtype == float32 else 0,
+                        1 if ab.dim(1) == 96 else 0], counters=1,
+                       buf_slots=[self._tensor_slot(t) for t in (parameters, norm_weight, state, slots, output)] +
+                                 ([self._tensor_slot(qkvz)] if direct_qkvz else []) +
+                                 ([self._tensor_slot(ab)] if direct_ab else []))
+
+    def qwen_gdn_output_layer(self, projected: DTensor, output: DTensor):
+        """Publish the out-projection's internal BF16 buffer to a graph tensor."""
+        T = self._tokens(projected.dim(0))
+        assert T == 8 and projected.num_dims == 2 and projected.dim(1) == 5120
+        assert output.num_dims == 2 and (output.dim(0), output.dim(1)) == (T, 5120)
+        self._dtypes("qwen_gdn_output", projected=(projected, bfloat16), output=(output, bfloat16))
+        self._add_node("qwen_gdn_output", (40, 1, 1), (256, 1, 1), [projected, output],
+                       [(1, -1, -1), (1, -1, -1)], [],
+                       buf_slots=[self._tensor_slot(output)])
+
     def scaled_gemm_tile_layer(
         self,
         input: DTensor,     # [T, K] e4m3 bytes (uint8): a group_quant node's output (then its fp32 scales [K / 128][T])

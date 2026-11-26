@@ -35,7 +35,12 @@ constexpr int WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE = 6 * 1024;
 constexpr int WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE = 3 * 1024;
 #endif
 
-#if defined(MODE_ONLINE_NOTOKEN) || defined(MODE_MULTI_TURN)
+#ifdef MPK_EXPERIMENT_WORKER_DYNAMIC_SMEM_BYTES
+// Only for an explicitly specialized task graph whose variants do not use
+// the normal full-model dynamic shared-memory budget.
+constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+    MPK_EXPERIMENT_WORKER_DYNAMIC_SMEM_BYTES;
+#elif defined(MODE_ONLINE_NOTOKEN) || defined(MODE_MULTI_TURN)
 // Have to be smaller for vllm compatibility, or program will stuck
 #if MPK_TARGET_CC >= 90
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
@@ -82,7 +87,11 @@ typedef unsigned long long int EventCounter;
 int const MAX_INPUTS_PER_TASK = 8;
 int const MAX_OUTPUTS_PER_TASK = 3;
 // B200 has 148 SMs — need more workers than the default 128
+#ifdef MPK_EXPERIMENT_MAX_WORKERS
+int const MAX_NUM_WORKERS = MPK_EXPERIMENT_MAX_WORKERS;
+#else
 int const MAX_NUM_WORKERS = 160;
+#endif
 
 enum TaskType {
   TASK_TERMINATE = 0,
@@ -296,7 +305,25 @@ enum TaskType {
   // mHC's post step of a TP sublayer and the first half of the next
   // sublayer's pre step in one task (tasks/hc_post_mix.cuh).
   TASK_HC_POST_MIX_SM100 = 530,
+  // Static-only Qwen3.8 GDN decode stages (no persistent-runtime variant).
+  TASK_QWEN_GDN_CONV_SM100 = 531,
+  TASK_QWEN_GDN_DELTA_SM100 = 532,
+  TASK_QWEN_GDN_OUTPUT_SM100 = 533,
   TASK_STATIC_TASK_END = 549, // end placeholder, not a real task
+  // Qwen3.5 single-token BF16 validation tasks (SM90/SM100).
+  TASK_QWEN35_NORM = 550,
+  TASK_QWEN35_CONV = 551,
+  TASK_QWEN35_DELTA = 552,
+  TASK_QWEN35_QK_ROPE = 553,
+  TASK_QWEN35_KV_STORE = 554,
+  TASK_QWEN35_ATTENTION = 555,
+  TASK_QWEN35_EMBED = 556,
+  TASK_QWEN35_ARGMAX = 557,
+  TASK_QWEN35_DOWN = 558,
+  TASK_QWEN35_PREFILL = 559,
+  TASK_QWEN38_RUNTIME_POSITION = 560,
+  TASK_QWEN36_SHARED_GATE = 561,
+  TASK_QWEN36_MOE_SUM = 562,
 };
 
 enum EventType {
@@ -421,6 +448,11 @@ struct RuntimeConfig {
   int *all_event_num_triggers;
   TaskDesc *all_tasks;
   EventDesc *all_events;
+  // Optional fixed-batch schedule: task ids grouped by worker, with offsets.
+  // Built once on the host; workers consume these lists without a scheduler.
+  TaskId *static_schedule_tasks;
+  int *static_schedule_offsets;
+  bool static_schedule_enabled;
   TaskId **worker_queues;
   EventId **sched_queues;
   TaskId *first_tasks;

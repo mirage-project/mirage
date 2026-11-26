@@ -405,6 +405,21 @@ def test_assert_in_pool_catches_a_detached_copy():
         plan.assert_in_pool(copy, "k")
 
 
+def test_assert_in_pool_accepts_single_page_component_view():
+    spec = KVSpec("gqa", per_entry_bytes=2048, layer_ids=(0, 1),
+                  preferred_block_size=64)
+    plan = plan_kv_groups([spec])
+    _pool, views = plan.allocate_pool(
+        {"gqa": [("k", (8, 64), torch.bfloat16),
+                 ("v", (8, 64), torch.bfloat16)]},
+        max_num_pages=1, device="cpu")
+    view = views[0]["k"][0]
+    assert view.shape[0] == 1
+    assert plan.assert_in_pool(view, "single-page k") is view
+    with _raises(AssertionError):
+        plan.assert_in_pool(view.clone(), "detached single-page k")
+
+
 def test_kernel_entry_multiple_constraint():
     spec = KVSpec("x", per_entry_bytes=100, layer_ids=(0,),
                   block_size_multiple_of=16)

@@ -465,6 +465,12 @@ __device__ __forceinline__ void
 
   if (warp_idx == 5) {
     // DMA warp (1)
+#ifdef MPK_QWEN_TENSORMAP_ACQUIRE_DIAGNOSTIC
+    if (cute::elect_one_sync()) {
+      asm volatile("fence.proxy.tensormap::generic.acquire.sys [%0], 128;"
+                   :: "l"(tma_a.desc_ptr) : "memory");
+    }
+#endif
 
     uint32_t const lane_idx = cutlass::canonical_lane_idx();
     cute::ThrCopy thr_copy_b = copyB.get_slice(lane_idx);
@@ -606,6 +612,7 @@ __device__ __forceinline__ void
           int acc_empty_phase = num_tiles_executed / NUM_ACC_STAGE % 2 ^ 1;
           cute::wait_barrier(shared_storage.acc_empty_mbar_ptr[acc_buf_idx],
                              acc_empty_phase);
+          asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");
 
           // Initialize the accumulator to zero
           tiled_mma.accumulate_ = cute::UMMA::ScaleOut::Zero;
@@ -627,6 +634,8 @@ __device__ __forceinline__ void
               cute::wait_barrier(shared_storage.b_full_mbar_ptr[smem_rd_buffer],
                                  mma_rd_ab_full_phase);
             }
+            // Order the async MMA operand read after both TMA loads complete.
+            asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");
 
             // Perform MMA operation
             for (int k_block = 0; k_block < cute::size<2>(tCrA); ++k_block) {
@@ -774,10 +783,15 @@ __device__ __forceinline__ void
 
           cute::wait_barrier(shared_storage.acc_full_mbar_ptr[acc_buf_idx],
                              acc_full_phase);
+          asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");
           // T2R copy
           cute::copy(tiled_copy_t2r,
                      tTR_tAcc(cute::_, cute::_, cute::_, cute::_, acc_buf_idx),
                      tTR_rAcc);
+          // Complete the asynchronous TMEM load before using its registers
+          // and before allowing the MMA warp to reuse this accumulator.
+          asm volatile("tcgen05.wait::ld.sync.aligned;" ::: "memory");
+          asm volatile("tcgen05.fence::before_thread_sync;" ::: "memory");
 
           // arrive acc empty buffer
           epilogue_wg_barrier.arrive_and_wait();

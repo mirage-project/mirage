@@ -77,7 +77,8 @@ __device__ static inline void wait(Barrier &smem_barrier, uint32_t phase) {
                "bra.uni                   LAB_WAIT;\n"
                "DONE:\n"
                "}\n" ::"r"(mbar_ptr),
-               "r"(phase));
+               "r"(phase)
+               : "memory");
 
 #elif defined(__CUDA_ARCH__)
   asm volatile("brkpt;\n" ::);
@@ -108,7 +109,8 @@ __device__ static inline bool try_wait_barrier(uint64_t &smem_barrier,
                "selp.b32 %0, 1, 0, P1; \n\t"
                "}"
                : "=r"(waitComplete)
-               : "r"(smem_int_ptr), "r"(phase));
+               : "r"(smem_int_ptr), "r"(phase)
+               : "memory");
 
   return static_cast<bool>(waitComplete);
 }

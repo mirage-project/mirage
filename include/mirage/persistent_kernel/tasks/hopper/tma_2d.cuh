@@ -41,6 +41,7 @@ struct tma_2d {
   static constexpr size_t GMEM_COL = GMEM_COL_;
   static constexpr size_t SMEM_ROW = SMEM_ROW_;
   static constexpr size_t SMEM_COL = SMEM_COL_;
+  static constexpr size_t GMEM_STRIDE_ROW = GMEM_STRIDE_ROW_;
 
   static constexpr size_t SMEM_REPEAT_COL = SMEM_REPEAT_COL_;
   static constexpr size_t SMEM_REPEAT_ROW = SMEM_REPEAT_ROW_;

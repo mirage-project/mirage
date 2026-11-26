@@ -28,6 +28,11 @@
 
 namespace kernel {
 
+#ifdef MPK_QWEN_LINEAR_OUTPUT_GUARD
+#define MPK_QWEN_LINEAR_RETRY_NONFINITE_DIAGNOSTIC
+#define MPK_QWEN_LINEAR_GLOBAL_RETRY_DIAGNOSTIC
+#endif
+
 template <typename T_,
           typename TMA_A,
           typename TMA_B,
@@ -43,11 +48,32 @@ template <typename T_,
           int NUM_AB_STAGE = 8,
           int NUM_ACC_STAGE = 2,
           int NUM_C_STAGE = 4>
-__device__ __noinline__ void
-    linear_sm100_mpk_task_impl(const TMA_A &tma_a,
+__device__ __noinline__ bool
+    linear_sm100_mpk_task_once(const TMA_A &tma_a,
                                const TMA_B &tma_b,
                                BiasTensor mBias,
                                const TMA_OUT &tma_out) {
+#ifdef MPK_QWEN_LINEAR_RETRY_NONFINITE_DIAGNOSTIC
+  __shared__ int nonfinite_output;
+  if (threadIdx.x == 0) {
+    nonfinite_output = 0;
+  }
+  __syncthreads();
+#endif
+#ifdef MPK_QWEN_LINEAR_SINGLE_AB_STAGE_DIAGNOSTIC
+  // Reuse only buffer zero to serialize TMA loads with MMA reads.  The
+  // allocated storage and descriptor layouts remain unchanged.
+  constexpr int kActiveABStages = 1;
+#else
+  constexpr int kActiveABStages = NUM_AB_STAGE;
+#endif
+#ifdef MPK_QWEN_LINEAR_SINGLE_ACC_STAGE_DIAGNOSTIC
+  // Keep the allocation unchanged but wait for the epilogue before reusing
+  // the only active TMEM accumulator buffer.
+  constexpr int kActiveAccStages = 1;
+#else
+  constexpr int kActiveAccStages = NUM_ACC_STAGE;
+#endif
   int warp_idx = cutlass::canonical_warp_idx_sync();
 
   // Construct the MMA grid coordinate from the CTA grid coordinate
@@ -413,6 +439,14 @@ __device__ __noinline__ void
 
   if (warp_idx == 5) {
     // TMA warp (1)
+#ifdef MPK_QWEN_TENSORMAP_ACQUIRE_DIAGNOSTIC
+    if (cute::elect_one_sync()) {
+      asm volatile("fence.proxy.tensormap::generic.acquire.sys [%0], 128;"
+                   :: "l"(tma_a.desc_ptr) : "memory");
+      asm volatile("fence.proxy.tensormap::generic.acquire.sys [%0], 128;"
+                   :: "l"(tma_b.desc_ptr) : "memory");
+    }
+#endif
     int total_k_tile_count = 0;
     for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
       for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
@@ -421,20 +455,23 @@ __device__ __noinline__ void
         total_k_tile_count += k_tile_count;
 
         int tma_wr_k_tile = 0;
-        int smem_wr_buffer = (num_prev_k_blk + tma_wr_k_tile) % NUM_AB_STAGE;
+        int smem_wr_buffer = (num_prev_k_blk + tma_wr_k_tile) % kActiveABStages;
         int tma_wr_ab_empty_phase =
-            (num_prev_k_blk + tma_wr_k_tile) / NUM_AB_STAGE % 2 ^ 1;
+            (num_prev_k_blk + tma_wr_k_tile) / kActiveABStages % 2 ^ 1;
 
-        bool peek_ab_empty_status =
+        bool peek_ab_empty_status = false;
+#ifndef MPK_QWEN_LINEAR_BLOCKING_BARRIER_DIAGNOSTIC
+        peek_ab_empty_status =
             try_wait_barrier(shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
                              tma_wr_ab_empty_phase);
+#endif
 
         // CUTE_UNROLL
         for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
 
           int tma_wr_k_tile_next = tma_wr_k_tile + 1;
           int smem_wr_buffer_next =
-              (num_prev_k_blk + tma_wr_k_tile_next) % NUM_AB_STAGE;
+              (num_prev_k_blk + tma_wr_k_tile_next) % kActiveABStages;
           int tma_wr_ab_empty_phase_next = smem_wr_buffer_next == 0
                                                ? tma_wr_ab_empty_phase ^ 1
                                                : tma_wr_ab_empty_phase;
@@ -467,9 +504,11 @@ __device__ __noinline__ void
           }
 
           if (tma_wr_k_tile_next < k_tile_count) {
+#ifndef MPK_QWEN_LINEAR_BLOCKING_BARRIER_DIAGNOSTIC
             peek_ab_empty_status = try_wait_barrier(
                 shared_storage.ab_empty_mbar_ptr[smem_wr_buffer_next],
                 tma_wr_ab_empty_phase_next);
+#endif
           }
 
           tma_wr_k_tile = tma_wr_k_tile_next;
@@ -492,25 +531,31 @@ __device__ __noinline__ void
     for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
       for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
 
-        int acc_buf_idx = num_tiles_executed % NUM_ACC_STAGE;
+        int acc_buf_idx = num_tiles_executed % kActiveAccStages;
         auto tCtAcc_Slice = tCtAcc(cute::_, cute::_, cute::_, acc_buf_idx);
 
         int num_prev_k_blk = total_k_tile_count;
         total_k_tile_count += k_tile_count;
 
         int mma_rd_k_tile = 0;
-        int smem_rd_buffer = (num_prev_k_blk + mma_rd_k_tile) % NUM_AB_STAGE;
+        int smem_rd_buffer = (num_prev_k_blk + mma_rd_k_tile) % kActiveABStages;
         int mma_rd_ab_full_phase =
-            (num_prev_k_blk + mma_rd_k_tile) / NUM_AB_STAGE % 2;
+            (num_prev_k_blk + mma_rd_k_tile) / kActiveABStages % 2;
 
         // Peek full phase
-        bool peek_ab_full_status =
+        bool peek_ab_full_status = false;
+#ifndef MPK_QWEN_LINEAR_BLOCKING_BARRIER_DIAGNOSTIC
+        peek_ab_full_status =
             try_wait_barrier(shared_storage.ab_full_mbar_ptr[smem_rd_buffer],
                              mma_rd_ab_full_phase);
+#endif
 
-        int acc_empty_phase = num_tiles_executed / NUM_ACC_STAGE % 2 ^ 1;
+        int acc_empty_phase = num_tiles_executed / kActiveAccStages % 2 ^ 1;
         cute::wait_barrier(shared_storage.acc_empty_mbar_ptr[acc_buf_idx],
                            acc_empty_phase);
+        // The epilogue warp released this TMEM buffer after tcgen05.ld.
+        // Order the next async MMA after that cross-warp synchronization.
+        asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");
 
         // Initialize the accumulator to zero
         tiled_mma.accumulate_ = cute::UMMA::ScaleOut::Zero;
@@ -518,7 +563,7 @@ __device__ __noinline__ void
         for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
           int mma_rd_k_tile_next = mma_rd_k_tile + 1;
           int smem_rd_buffer_next =
-              (num_prev_k_blk + mma_rd_k_tile_next) % NUM_AB_STAGE;
+              (num_prev_k_blk + mma_rd_k_tile_next) % kActiveABStages;
           int mma_rd_ab_full_phase_next = smem_rd_buffer_next == 0
                                               ? mma_rd_ab_full_phase ^ 1
                                               : mma_rd_ab_full_phase;
@@ -527,6 +572,10 @@ __device__ __noinline__ void
             cute::wait_barrier(shared_storage.ab_full_mbar_ptr[smem_rd_buffer],
                                mma_rd_ab_full_phase);
           }
+          // tcgen05.mma is asynchronous.  Keep its shared-memory read after
+          // the TMA completion observed through ab_full, including the peek
+          // fast path.
+          asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");
 
           // if (!peek_ab_full_status){
           //   wait(ab_full_mbar_ptr[smem_rd_buffer], mma_rd_ab_full_phase);
@@ -545,9 +594,11 @@ __device__ __noinline__ void
               &shared_storage.ab_empty_mbar_ptr[smem_rd_buffer]);
 
           if (mma_rd_k_tile_next < k_tile_count) {
+#ifndef MPK_QWEN_LINEAR_BLOCKING_BARRIER_DIAGNOSTIC
             peek_ab_full_status = try_wait_barrier(
                 shared_storage.ab_full_mbar_ptr[smem_rd_buffer_next],
                 mma_rd_ab_full_phase_next);
+#endif
           }
 
           mma_rd_k_tile = mma_rd_k_tile_next;
@@ -571,6 +622,12 @@ __device__ __noinline__ void
     }
     tmem_allocation_result_barrier.arrive_and_wait();
     tCtAcc.data() = shared_storage.tmem_base_ptr;
+#ifdef MPK_QWEN_TENSORMAP_ACQUIRE_DIAGNOSTIC
+    if (warp_idx == 0 && cute::elect_one_sync()) {
+      asm volatile("fence.proxy.tensormap::generic.acquire.sys [%0], 128;"
+                   :: "l"(tma_out.desc_ptr) : "memory");
+    }
+#endif
 
     using AccType = typename decltype(tCtAcc)::value_type;
     using TypeBias = T_;
@@ -608,8 +665,8 @@ __device__ __noinline__ void
     int num_tiles_executed = 0;
     for (int m_tile = 0; m_tile < cute::size<3>(tCgA); ++m_tile) {
       for (int n_tile = 0; n_tile < cute::size<3>(tCgB); ++n_tile) {
-        int acc_buf_idx = num_tiles_executed % NUM_ACC_STAGE;
-        int acc_full_phase = num_tiles_executed / NUM_ACC_STAGE % 2;
+        int acc_buf_idx = num_tiles_executed % kActiveAccStages;
+        int acc_full_phase = num_tiles_executed / kActiveAccStages % 2;
         int c_smem_wr_buffer_idx = num_tiles_executed % NUM_C_STAGE;
 
         cute::Tensor tCgBias =
@@ -666,10 +723,30 @@ __device__ __noinline__ void
 
         cute::wait_barrier(shared_storage.acc_full_mbar_ptr[acc_buf_idx],
                            acc_full_phase);
+        // The MMA warp committed this accumulator via the mbarrier.  The
+        // following tcgen05.ld needs an explicit post-sync ordering fence.
+        asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");
         // T2R copy
         cute::copy(tiled_copy_t2r,
                    tTR_tAcc(cute::_, cute::_, cute::_, cute::_, acc_buf_idx),
                    tTR_rAcc);
+        // tcgen05.ld is asynchronous even when using the .sync form. Wait
+        // before reading the accumulator registers or releasing the TMEM
+        // buffer to the MMA warp.
+        asm volatile("tcgen05.wait::ld.sync.aligned;" ::: "memory");
+        // Order the completed TMEM read before the cross-warp barrier that
+        // releases this accumulator buffer to the MMA warp.
+        asm volatile("tcgen05.fence::before_thread_sync;" ::: "memory");
+#ifdef MPK_QWEN_LINEAR_NAN_TRACE_DIAGNOSTIC
+        for (int i = 0; i < tTR_rAcc.size(); ++i) {
+          float value = static_cast<float>(tTR_rAcc[i]);
+          if (value != value) {
+            printf("SM100_LINEAR_NAN_ACC out=%d reduction=%d thread=%d m=%d n=%d reg=%d\n",
+                   OUTPUT_SIZE, REDUCTION_SIZE, threadIdx.x, m_tile, n_tile, i);
+            break;
+          }
+        }
+#endif
 
         // arrive acc empty buffer
         epilogue_wg_barrier.arrive_and_wait();
@@ -688,6 +765,14 @@ __device__ __noinline__ void
         for (int i = 0; i < tCrC.size(); i++) {
           tCrC[i] = converter(tTR_rAcc[i]);
         }
+#ifdef MPK_QWEN_LINEAR_RETRY_NONFINITE_DIAGNOSTIC
+        for (int i = 0; i < tCrC.size(); ++i) {
+          if (!isfinite(static_cast<float>(tCrC[i]))) {
+            atomicExch(&nonfinite_output, 1);
+            break;
+          }
+        }
+#endif
 
         // R2S copy
         cute::Tensor sC_epi_slice =
@@ -713,13 +798,20 @@ __device__ __noinline__ void
           cute::tma_store_arrive();
           cute::tma_store_wait<NUM_C_STAGE - 1>();
         }
+        // All epilogue warps write the next C tile.  They must not advance
+        // to a reused SMEM buffer until warp 0 has completed the TMA source
+        // read wait above; otherwise they can overwrite a tile still being
+        // read by the previous store.
+        epilogue_wg_barrier.arrive_and_wait();
 
         num_tiles_executed++;
       }
     }
-    // wait all TMA stores to complete
+    // Task completion publishes the output to other worker CTAs.  CuTe's
+    // tma_store_wait<0>() uses wait_group.read, which only waits until the
+    // source SMEM has been read; the global write may still be in flight.
     if (warp_idx == 0 && cute::elect_one_sync()) {
-      cute::tma_store_wait<0>();
+      asm volatile("cp.async.bulk.wait_group 0;" ::: "memory");
     }
   }
   __syncthreads();
@@ -731,7 +823,114 @@ __device__ __noinline__ void
     // tmem_allocator.release_allocation_lock();
     tmem_allocator.free(shared_storage.tmem_base_ptr, num_tmem_columns);
   }
+#ifdef MPK_QWEN_LINEAR_RETRY_NONFINITE_DIAGNOSTIC
+  __syncthreads();
+  return nonfinite_output == 0;
+#else
+  return true;
+#endif
+
+} // end linear_sm100_mpk_task_once
+
+template <typename T_,
+          typename TMA_A,
+          typename TMA_B,
+          class BiasTensor,
+          typename TMA_OUT,
+          int MMA_M,
+          int MMA_N,
+          int BATCH_SIZE,
+          int OUTPUT_SIZE,
+          int REDUCTION_SIZE,
+          bool NOBIAS,
+          bool SplitK,
+          int NUM_AB_STAGE = 8,
+          int NUM_ACC_STAGE = 2,
+          int NUM_C_STAGE = 4>
+__device__ __noinline__ void
+    linear_sm100_mpk_task_impl(const TMA_A &tma_a,
+                               const TMA_B &tma_b,
+                               BiasTensor mBias,
+                               const TMA_OUT &tma_out,
+                               void *output_ptr = nullptr) {
+#ifdef MPK_QWEN_LINEAR_RETRY_NONFINITE_DIAGNOSTIC
+  if constexpr (!SplitK) {
+#ifdef MPK_QWEN_LINEAR_GLOBAL_RETRY_DIAGNOSTIC
+    __shared__ int global_nonfinite;
+    if (output_ptr == nullptr) {
+      __trap();
+    }
+    T_ *global_output = static_cast<T_ *>(output_ptr);
+#endif
+    constexpr int max_attempts = 4;
+    for (int attempt = 0; attempt < max_attempts; ++attempt) {
+      bool finite = linear_sm100_mpk_task_once<T_, TMA_A, TMA_B, BiasTensor,
+                                                TMA_OUT, MMA_M, MMA_N,
+                                                BATCH_SIZE, OUTPUT_SIZE,
+                                                REDUCTION_SIZE, NOBIAS, SplitK,
+                                                NUM_AB_STAGE, NUM_ACC_STAGE,
+                                                NUM_C_STAGE>(tma_a, tma_b,
+                                                             mBias, tma_out);
+#ifdef MPK_QWEN_LINEAR_GLOBAL_RETRY_DIAGNOSTIC
+      if (threadIdx.x == 0) {
+        global_nonfinite = 0;
+      }
+      __syncthreads();
+      for (int index = threadIdx.x; index < BATCH_SIZE * OUTPUT_SIZE;
+           index += blockDim.x) {
+        int row = index / OUTPUT_SIZE;
+        int col = index % OUTPUT_SIZE;
+        float value = static_cast<float>(
+            global_output[row * TMA_OUT::GMEM_STRIDE_ROW + col]);
+        if (!isfinite(value)) {
+          atomicExch(&global_nonfinite, 1);
+          break;
+        }
+      }
+      __syncthreads();
+      bool register_finite = finite;
+      finite = finite && global_nonfinite == 0;
+#endif
+      if (finite) {
+        return;
+      }
+      if (threadIdx.x == 0) {
+#if !defined(MPK_QWEN_LINEAR_OUTPUT_GUARD) || \
+    defined(MPK_QWEN_LINEAR_GUARD_TRACE)
+        printf("SM100_LINEAR_RETRY attempt=%d out=%d reduction=%d block=%d"
+#ifdef MPK_QWEN_LINEAR_GLOBAL_RETRY_DIAGNOSTIC
+               " register_finite=%d global_finite=%d"
+#endif
+               "\n",
+               attempt + 1, OUTPUT_SIZE, REDUCTION_SIZE, blockIdx.x
+#ifdef MPK_QWEN_LINEAR_GLOBAL_RETRY_DIAGNOSTIC
+               , int(register_finite), int(global_nonfinite == 0)
+#endif
+        );
+#endif
+      }
+    }
+    __trap();
+  } else {
+    // A Split-K output uses reduction stores, so retrying would add the
+    // same partial result twice. Keep its original one-pass behavior.
+    linear_sm100_mpk_task_once<T_, TMA_A, TMA_B, BiasTensor, TMA_OUT, MMA_M,
+                                MMA_N, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE,
+                                NOBIAS, SplitK, NUM_AB_STAGE, NUM_ACC_STAGE,
+                                NUM_C_STAGE>(tma_a, tma_b, mBias, tma_out);
+  }
+#else
+  linear_sm100_mpk_task_once<T_, TMA_A, TMA_B, BiasTensor, TMA_OUT, MMA_M,
+                              MMA_N, BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE,
+                              NOBIAS, SplitK, NUM_AB_STAGE, NUM_ACC_STAGE,
+                              NUM_C_STAGE>(tma_a, tma_b, mBias, tma_out);
+#endif
 
 } // end linear_sm100_mpk_task_impl
+
+#ifdef MPK_QWEN_LINEAR_OUTPUT_GUARD
+#undef MPK_QWEN_LINEAR_RETRY_NONFINITE_DIAGNOSTIC
+#undef MPK_QWEN_LINEAR_GLOBAL_RETRY_DIAGNOSTIC
+#endif
 
 } // namespace kernel
