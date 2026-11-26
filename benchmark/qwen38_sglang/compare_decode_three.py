@@ -1,7 +1,7 @@
 """Fixed-batch decode comparison for Qwen3.8-27B on one B200.
 
 Run each backend in a separate environment/process with the same prepared
-``worker.py --backend prepare`` input file. Timings cover the 63 token
+``--backend prepare`` input file. Timings cover the 63 token
 intervals after each request's first generated token; prefill, model load,
 graph compile, and engine startup are excluded. Streaming engines include
 host response delivery, so these are exploratory wall times.
@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 from pathlib import Path
 import statistics
@@ -20,6 +21,35 @@ import time
 
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def prepare_inputs(args):
+    """Write one shared set of distinct token-ID prompts for all backends."""
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=True)
+    body = ("A research team is comparing language model inference on one GPU. "
+            "They record latency, throughput, memory usage and reproducibility. "
+            "Requests have separate histories and must never share their cache. "
+            "Explain the tradeoffs clearly and give a practical example. ")
+    tail = tokenizer(body, add_special_tokens=False)["input_ids"]
+    if not tail:
+        raise ValueError("Tokenizer returned an empty prompt body")
+    cases = {}
+    for batch in (4, 8, 16, 32):
+        rows = []
+        for index in range(batch):
+            head = tokenizer(f"Benchmark request {index + 1}. ",
+                             add_special_tokens=False)["input_ids"]
+            rows.append((head + tail * math.ceil(128 / len(tail)))[:128])
+        if len({tuple(row) for row in rows}) != batch:
+            raise ValueError("Prompt rows are not distinct")
+        cases[str(batch)] = rows
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps({
+        "config_sha256": digest(args.model / "config.json"),
+        "prompt_tokens": 128, "new_tokens": 64, "prompt_ids": cases,
+    }, indent=2) + "\n")
 
 
 def first_mismatch(left, right):
@@ -126,9 +156,85 @@ def run_hf(args, rows):
         torch.cuda.empty_cache()
 
 
+class BatchStreamTimeline:
+    """Track client-visible token arrivals without assuming stream order."""
+
+    def __init__(self, start, batch_size, new_tokens):
+        self.start = start
+        self.new_tokens = new_tokens
+        self.rows = [dict(output_ids=[], request_id=None, first_observation_tokens=None,
+                          first_token_seconds=None, last_token_seconds=None)
+                     for _ in range(batch_size)]
+        self.request_ids = {}
+        self.meta_info = [None] * batch_size
+
+    def update(self, chunk, now):
+        index = chunk.get("index")
+        if type(index) is not int or not 0 <= index < len(self.rows):
+            raise ValueError(f"Invalid SGLang streaming response index: {index!r}")
+        meta = chunk.get("meta_info")
+        if not isinstance(meta, dict):
+            raise ValueError("SGLang streaming response has no meta_info")
+        request_id = meta.get("id")
+        count = meta.get("completion_tokens")
+        ids = chunk.get("output_ids")
+        if not isinstance(request_id, str) or not request_id or \
+                type(count) is not int or not 0 <= count <= self.new_tokens or \
+                not isinstance(ids, list) or any(type(token) is not int for token in ids):
+            raise ValueError("Invalid SGLang streaming request ID, token count, or output IDs")
+        row = self.rows[index]
+        if row["request_id"] is None:
+            if request_id in self.request_ids:
+                raise ValueError("SGLang streaming request ID appeared in two rows")
+            row["request_id"] = request_id
+            self.request_ids[request_id] = index
+        elif row["request_id"] != request_id:
+            raise ValueError("SGLang streaming response changed request ID for a row")
+        previous = row["output_ids"]
+        if len(ids) == count and ids[:len(previous)] == previous:
+            cumulative = ids
+        elif len(previous) + len(ids) == count:
+            cumulative = previous + ids
+        else:
+            raise ValueError("SGLang streaming output is neither cumulative nor incremental")
+        if len(cumulative) > len(previous):
+            if row["first_observation_tokens"] is None:
+                row["first_observation_tokens"] = len(cumulative)
+                if len(cumulative) == 1:
+                    row["first_token_seconds"] = now - self.start
+            row["last_token_seconds"] = now - self.start
+            row["output_ids"] = list(cumulative)
+        self.meta_info[index] = meta
+
+    def finish(self, now):
+        complete = all(len(row["output_ids"]) == self.new_tokens for row in self.rows)
+        first_exact = all(row["first_observation_tokens"] == 1 for row in self.rows)
+        valid = complete and first_exact
+        reason = (None if valid else "incomplete_stream" if not complete
+                  else "coalesced_first_event")
+        first = (max(row["first_token_seconds"] for row in self.rows)
+                 if valid else None)
+        completion = (max(row["last_token_seconds"] for row in self.rows)
+                      if complete else None)
+        per_row = [dict(index=index, request_id=row["request_id"],
+                        first_observation_tokens=row["first_observation_tokens"],
+                        first_token_seconds=row["first_token_seconds"],
+                        last_token_seconds=row["last_token_seconds"],
+                        decode_tail_seconds=(row["last_token_seconds"] -
+                                             row["first_token_seconds"])
+                        if row["first_token_seconds"] is not None and complete else None)
+                   for index, row in enumerate(self.rows)]
+        return {"valid": valid, "invalid_reason": reason,
+                "timing_scope": "client-visible streamed token arrivals; includes scheduling and IPC",
+                "batch_ttft_seconds": first,
+                "decode_tail_seconds": completion - first if valid else None,
+                "completion_seconds": completion,
+                "total_seconds": now - self.start,
+                "per_row": per_row}
+
+
 def run_sglang(args, rows):
     import sglang as sgl
-    from worker import BatchStreamTimeline
 
     batch = len(rows)
     settings = dict(model_path=str(args.model), tp_size=1, dtype="bfloat16",
@@ -222,16 +328,21 @@ async def run_vllm_async(args, rows):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend", choices=("mpk", "hf", "sglang", "vllm"), required=True)
+    parser.add_argument("--backend", choices=("prepare", "mpk", "hf", "sglang", "vllm"), required=True)
     parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--model", type=Path, required=True)
-    parser.add_argument("--inputs", type=Path, required=True)
+    parser.add_argument("--inputs", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--compiled", type=Path)
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--memory-fraction", type=float, default=0.75)
     args = parser.parse_args()
+    if args.backend == "prepare":
+        prepare_inputs(args)
+        return
+    if args.inputs is None:
+        parser.error("--inputs is required for a timed backend")
     if args.warmups < 0 or args.repeats < 1:
         parser.error("warmups must be >= 0 and repeats >= 1")
     inputs = json.loads(args.inputs.read_text())
