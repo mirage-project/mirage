@@ -553,6 +553,50 @@ void Graph::register_task_for_op(KNOperator const *op,
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(2, 1, TASK_DFLASH_KV_STORE_SM100, variant_id);
+  } else if (name == "qwen35_prefill") {
+    assert((params.size() == 2 || params.size() == 8) && params[0] >= 0 && params[0] <= 11);
+    int inputs[] = {2,3,3,4,7,6,3,7,1,2,2,8};
+    int outputs[] = {1,1,1,2,3,3,2,2,1,1,1,3};
+    int variant_id = task_register->register_qwen35_prefill_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(inputs[params[0]], outputs[params[0]],
+                                    TASK_QWEN35_PREFILL, variant_id);
+  } else if (name == "qwen38_splitk") {
+    int variant_id = task_register->register_qwen35_down_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_QWEN35_DOWN, variant_id);
+  } else if (name == "qwen38_runtime_position") {
+    int variant_id = task_register->register_qwen38_runtime_position_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 2, TASK_QWEN38_RUNTIME_POSITION, variant_id);
+  } else if (name == "qwen35_embed" || name == "qwen35_argmax") {
+    bool embed = name == "qwen35_embed";
+    int variant_id = task_register->register_qwen35_model_task(customized->bgraph, {embed ? 0 : 1});
+    task_config[op] = std::make_tuple(embed ? 2 : 1, 1,
+        embed ? TASK_QWEN35_EMBED : TASK_QWEN35_ARGMAX, variant_id);
+  } else if (name == "qwen36_shared_gate") {
+    int variant_id = task_register->register_qwen36_shared_gate_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_QWEN36_SHARED_GATE, variant_id);
+  } else if (name == "qwen36_moe_sum") {
+    int variant_id = task_register->register_qwen36_moe_sum_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(4, 1, TASK_QWEN36_MOE_SUM, variant_id);
+  } else if (name == "qwen35_qk_rope" || name == "qwen35_kv_store" ||
+             name == "qwen35_attention" || name == "qwen35_sdpa_attention" ||
+             name == "qwen38_kv_store_offline" || name == "qwen38_attention_offline") {
+    int kind = name == "qwen35_qk_rope" ? 0 :
+               (name == "qwen35_kv_store" || name == "qwen38_kv_store_offline" ? 1 :
+                (name == "qwen35_attention" || name == "qwen38_attention_offline" ? 2 : 3));
+    bool offline = name == "qwen38_kv_store_offline" || name == "qwen38_attention_offline";
+    int variant_id = task_register->register_qwen35_attention_task(customized->bgraph,
+                                                                    offline ? std::vector<int>{kind, 1} : std::vector<int>{kind});
+    runtime::TaskType types[] = {TASK_QWEN35_QK_ROPE, TASK_QWEN35_KV_STORE,
+                                TASK_QWEN35_ATTENTION, TASK_QWEN35_ATTENTION};
+    int inputs[] = {5, 3, 6, 6}, outputs[] = {3, 2, 2, 2};
+    task_config[op] = std::make_tuple(inputs[kind], outputs[kind], types[kind], variant_id);
+  } else if (name == "qwen35_norm" || name == "qwen35_conv" || name == "qwen35_delta_grouped") {
+    int kind = name == "qwen35_norm" ? 0 : (name == "qwen35_conv" ? 1 : 3);
+    int variant_id = task_register->register_qwen35_task(customized->bgraph, {kind});
+    runtime::TaskType type = kind == 0 ? TASK_QWEN35_NORM :
+                   (kind == 1 ? TASK_QWEN35_CONV : TASK_QWEN35_DELTA);
+    task_config[op] = std::make_tuple(kind == 0 ? 2 : (kind == 1 ? 3 : 8),
+                                    kind >= 2 ? 2 : 1, type, variant_id);
   } else if (name == "inkling_sconv") {
     int variant_id = task_register->register_inkling_sconv_sm100_task(
         customized->bgraph, params);
@@ -1139,6 +1183,12 @@ void Graph::register_task_for_op(KNOperator const *op,
     int variant_id = task_register->register_kda_decode_sm100_task(
         customized->bgraph, params);
     task_config[op] = std::make_tuple(1, 1, TASK_KDA_DECODE_SM100, variant_id);
+  } else if (name == "qwen_gdn_conv") {
+    task_config[op] = std::make_tuple(4, 1, TASK_QWEN_GDN_CONV_SM100, 0);
+  } else if (name == "qwen_gdn_delta") {
+    task_config[op] = std::make_tuple(7, 1, TASK_QWEN_GDN_DELTA_SM100, 0);
+  } else if (name == "qwen_gdn_output") {
+    task_config[op] = std::make_tuple(1, 1, TASK_QWEN_GDN_OUTPUT_SM100, 0);
   } else if (name == "hc_post") {
     int variant_id =
         task_register->register_hc_post_sm100_task(customized->bgraph, params);

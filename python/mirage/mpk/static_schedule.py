@@ -171,7 +171,9 @@ def code_tag() -> str:
     _, include_path, _ = get_key_paths()
     h = hashlib.md5()
     root = os.path.join(include_path, "mirage", "static_megakernel")
-    for path in sorted(glob.glob(os.path.join(root, "*.cuh")) + glob.glob(os.path.join(root, "tasks", "*.cuh"))):
+    qwen_helper = os.path.join(include_path, "mirage", "persistent_kernel", "tasks", "common", "qwen35_gdn.cuh")
+    for path in sorted(glob.glob(os.path.join(root, "*.cuh")) +
+                       glob.glob(os.path.join(root, "tasks", "*.cuh")) + [qwen_helper]):
         with open(path, "rb") as f:
             h.update(f.read())
     return h.hexdigest()[:12]
@@ -929,7 +931,8 @@ def compile_command(cu_path: str, so_path: str, extra_flags: Optional[List[str]]
         scheme = "posix_prefix"
     python_include = sysconfig.get_paths(scheme=scheme)["include"]
     return ([shutil.which("nvcc"), "-O3", "-std=c++17", "-gencode", f"arch=compute_{arch},code=sm_{arch}",
-             f"-I{include_path}", f"-I{python_include}",
+             f"-I{include_path}", f"-I{os.path.join(include_path, 'mirage', 'persistent_kernel')}",
+             f"-I{python_include}",
              "-shared", "-Xcompiler=-fPIC", "-lcuda", cu_path, "-o", so_path]
             + list(extra_flags or []))
 

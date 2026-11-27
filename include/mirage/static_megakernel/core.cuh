@@ -528,7 +528,9 @@ __device__ __forceinline__ void kernel_begin(G const &g, KernelLocals &L) {
   L.sm = smem_raw + (L.base - su32(smem_raw));
   L.sm_id = blockIdx.x;
   int const sm_id = L.sm_id;
+#ifndef STATIC_GDN_NO_GEMM_RESOURCES
   cta_prologue(L.sm);
+#endif
 #ifdef STATIC_NO_START_BARRIER
   // serving with no start barrier (one GPU): every buffer the start would reset
   // has two sets (and so do the counters); launch n uses set n % 2, the other
@@ -668,7 +670,14 @@ __device__ __forceinline__ void kernel_begin(G const &g, KernelLocals &L) {
     *g.start_barrier = gtime();
   }
 #endif
+#ifdef STATIC_GDN_NO_GEMM_RESOURCES
+  // The Conv/Delta-only GDN graph never uses GEMM barriers or TMEM. Keep the
+  // CTA barrier: it publishes the shared launch state used by task scheduling.
+  L.tb = 0;
+  __syncthreads();
+#else
   L.tb = tmem_alloc_512(); // its __syncthreads also publishes rt
+#endif
 #ifdef STATIC_RESET_IN_KERNEL
   if (threadIdx.x == 0) {
     asm volatile("griddepcontrol.wait;" ::
@@ -706,7 +715,9 @@ __device__ __forceinline__ void kernel_end(G const &g, KernelLocals &L) {
   if (threadIdx.x == 0) {
     g.stamps[L.sm_id * NSTAMP + STAMP_END] = gtime();
   }
+#ifndef STATIC_GDN_NO_GEMM_RESOURCES
   tmem_dealloc_512(L.tb);
+#endif
 }
 
 } // namespace static_mk

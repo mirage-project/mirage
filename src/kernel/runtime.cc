@@ -327,6 +327,14 @@ void register_mugraph(
         for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
           for (int subtask_id = 0; subtask_id < num_subtasks; subtask_id++) {
             FullTaskDesc task(task_type, variant_id);
+            // Qwen3.8's offline graph partitions requests on grid.y. The
+            // worker uses this batch slot to read the active request and its
+            // planner-owned KV page from runtime metadata.
+            if (task_type == TASK_QWEN38_RUNTIME_POSITION ||
+                task_type == TASK_QWEN35_KV_STORE ||
+                task_type == TASK_QWEN35_ATTENTION) {
+              task.task_metadata.request_id = bid.y;
+            }
             // Set request_id for attention and paged_attention
             if ((task_type == TASK_ATTENTION_1) ||
                 (task_type == TASK_ATTENTION_2) ||
@@ -335,7 +343,7 @@ void register_mugraph(
                 (task_type == TASK_PAGED_ATTENTION_2) ||
                 (task_type == TASK_PAGED_ATTENTION_HOPPER) ||
                 (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_SM100) ||
-                (TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100) ||
+                (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100) ||
                 (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER) ||
                 (task_type == TASK_ATTN_SM100)) {
               // Note that we assume grid_dim.x corresponds to
@@ -1577,8 +1585,8 @@ TaskGraphResult print_task_graph(
                 // Non-fused case. Per-task block_size and stride both come
                 // off the input DTensor (in_dt). For views, in_dt.dim is
                 // the view's logical shape and in_dt.stride is the view's
-                // effective stride (= parent's stride for same-rank views,
-                // row-major from view dims for reshapes). No parent lookup
+                // effective stride (inherited for slices, row-major from the
+                // new dims for contiguous reshapes). No parent lookup
                 // needed at codegen time.
                 if (input_map.x >= 0) {
                   size_t block_size =
@@ -1815,6 +1823,19 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_GLM_MOE_ROUTER_SM100] = "TASK_GLM_MOE_ROUTER_SM100";
   task_type_to_name[TASK_CLAMPED_SWIGLU] = "TASK_CLAMPED_SWIGLU";
   task_type_to_name[TASK_INKLING_SCONV_SM100] = "TASK_INKLING_SCONV_SM100";
+  task_type_to_name[TASK_QWEN35_EMBED] = "TASK_QWEN35_EMBED";
+  task_type_to_name[TASK_QWEN35_ARGMAX] = "TASK_QWEN35_ARGMAX";
+  task_type_to_name[TASK_QWEN35_DOWN] = "TASK_QWEN35_DOWN";
+  task_type_to_name[TASK_QWEN35_PREFILL] = "TASK_QWEN35_PREFILL";
+  task_type_to_name[TASK_QWEN38_RUNTIME_POSITION] = "TASK_QWEN38_RUNTIME_POSITION";
+  task_type_to_name[TASK_QWEN36_SHARED_GATE] = "TASK_QWEN36_SHARED_GATE";
+  task_type_to_name[TASK_QWEN36_MOE_SUM] = "TASK_QWEN36_MOE_SUM";
+  task_type_to_name[TASK_QWEN35_NORM] = "TASK_QWEN35_NORM";
+  task_type_to_name[TASK_QWEN35_CONV] = "TASK_QWEN35_CONV";
+  task_type_to_name[TASK_QWEN35_DELTA] = "TASK_QWEN35_DELTA";
+  task_type_to_name[TASK_QWEN35_QK_ROPE] = "TASK_QWEN35_QK_ROPE";
+  task_type_to_name[TASK_QWEN35_KV_STORE] = "TASK_QWEN35_KV_STORE";
+  task_type_to_name[TASK_QWEN35_ATTENTION] = "TASK_QWEN35_ATTENTION";
   task_type_to_name[TASK_INKLING_MOE_ROUTER_SM100] =
       "TASK_INKLING_MOE_ROUTER_SM100";
   task_type_to_name[TASK_INKLING_ATTENTION_SM100] =

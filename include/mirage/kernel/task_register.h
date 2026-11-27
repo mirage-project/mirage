@@ -206,6 +206,22 @@ public:
                                   std::vector<int> const &params);
   int register_inkling_sconv_sm100_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params);
+  int register_qwen35_model_task(threadblock::Graph const &bgraph,
+                                std::vector<int> const &params);
+  int register_qwen36_shared_gate_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params);
+  int register_qwen36_moe_sum_task(threadblock::Graph const &bgraph,
+                                  std::vector<int> const &params);
+  int register_qwen38_runtime_position_task(threadblock::Graph const &bgraph,
+                                            std::vector<int> const &params);
+  int register_qwen35_down_task(threadblock::Graph const &bgraph,
+                                std::vector<int> const &params);
+  int register_qwen35_attention_task(threadblock::Graph const &bgraph,
+                                     std::vector<int> const &params);
+  int register_qwen35_task(threadblock::Graph const &bgraph,
+                          std::vector<int> const &params);
+  int register_qwen35_prefill_task(threadblock::Graph const &bgraph,
+                                 std::vector<int> const &params);
   int register_inkling_moe_router_sm100_task(threadblock::Graph const &bgraph,
                                              std::vector<int> const &params);
   int register_inkling_attention_sm100_task(threadblock::Graph const &bgraph,

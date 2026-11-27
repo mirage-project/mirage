@@ -314,6 +314,420 @@ int TaskRegister::register_glm_moe_router_sm100_task(
   return register_task_variant(TASK_GLM_MOE_ROUTER_SM100, code.to_string());
 }
 
+int TaskRegister::register_qwen35_prefill_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 8 && params[0] >= 0 && params[0] <= 11 && params[0] != 4);
+  int kind=params[0];
+  assert(params[1] == 0 || (kind == 7 && params[1] == 1));
+  int h=params[2], mid=params[3], qh=params[4], kvh=params[5], kh=params[6], vh=params[7];
+  assert(h==5120 && mid==17408 && qh==24 && kvh==4 && kh==16 && vh==48);
+  int channels=(2*kh+vh)*128, ab_width=((2*vh+63)/64)*64;
+  int rows=kind==7 ? bgraph.grid_dim.x : 64*qh;
+  assert(rows==qh || rows==64*qh);
+  int scratch=9*8192+3*4096+64+64*vh*128/2;
+  int inputs[] = {2,3,3,4,0,6,3,7,1,2,2,8};
+  int outputs[] = {1,1,1,2,0,3,2,2,1,1,1,3};
+  assert(bgraph.operators.size() == size_t(inputs[kind]+outputs[kind]));
+  assert(bgraph.block_dim.x == 256 && bgraph.block_dim.y == 1 && bgraph.block_dim.z == 1);
+  assert(bgraph.grid_dim.y == 1 && bgraph.grid_dim.z == 1);
+  std::vector<tb::TBInputOp *> tensors;
+  for (auto op:bgraph.operators) {
+    assert(op->op_type == type::TB_INPUT_OP);
+    tensors.push_back(static_cast<tb::TBInputOp *>(op));
+  }
+  assert(inputs[kind] <= MAX_INPUTS_PER_TASK && outputs[kind] <= MAX_OUTPUTS_PER_TASK);
+  std::vector<std::vector<int>> shapes;
+  std::vector<int> partitions;
+  std::vector<type::DataType> dtypes;
+  auto bf=type::DT_BFLOAT16, fp=type::DT_FLOAT32, integer=type::DT_INT64;
+  switch(kind) {
+    case 0:
+      shapes={{64},{248320,h},{64,h}}; partitions={0,-1,0};dtypes={integer,bf,bf};break;
+    case 1:
+      shapes={{64,h},{h},{1},{64,h}};partitions={0,-1,-1,0};dtypes={bf,fp,integer,bf};break;
+    case 2:
+      partitions={-1,0,-1,1};dtypes={bf,bf,integer,bf};break;
+    case 3:
+      shapes={{64,channels},{channels,4},{channels,3},{1},{64,channels},{channels,3}};
+      partitions={1,0,0,-1,1,0};dtypes={bf,bf,bf,integer,bf,bf};break;
+    case 11:
+      assert(vh!=kh);
+      shapes={{64,2*kh+vh,128},{64,vh,128},{64,ab_width},{2,vh},{128},{vh,128,128},{2},{vh,1},
+              {64,vh,128},{vh,128,128},{vh,scratch}};
+      partitions={-1,1,-1,1,-1,0,-1,0,1,0,0};
+      dtypes={bf,bf,bf,fp,tensors[4]->dtensor.data_type,fp,integer,integer,bf,fp,fp};
+      assert(tensors[2]->dtensor.stride[0]==ab_width);
+      break;
+    case 5:
+      shapes={{64,qh,512},{64,kvh,256},{256},{256},{64,2,64},{1},{64,qh,256},{64,kvh,256},{64,qh,256}};
+      partitions={0,0,-1,-1,0,-1,0,0,0};dtypes={bf,bf,fp,fp,bf,integer,bf,bf,bf};break;
+    case 6:
+      shapes={{64,kvh,256},{64,kvh*256},{3},{1024,kvh,256},{1024,kvh,256}};
+      partitions={-1,-1,-1,-1,-1};dtypes={bf,bf,integer,bf,bf};break;
+    case 7:
+      shapes={{rows,256},{rows,256},{rows,1},{1024,kvh,256},{1024,kvh,256},{rows,1},{2},{rows,256},
+              {rows,params[1] ? 4112 : 1536}};
+      partitions={0,0,0,-1,-1,0,-1,0,0};dtypes={bf,bf,integer,bf,bf,integer,integer,bf,fp};break;
+    case 8:
+      shapes={{64,2*mid},{64,mid}};partitions={0,0};dtypes={bf,bf};break;
+    case 9:
+      shapes={{64,h},{64,h},{64,h}};partitions={0,0,0};dtypes={bf,bf,bf};break;
+    case 10:
+      shapes={{64,h},{1},{1,h}};partitions={-1,-1,-1};dtypes={bf,integer,bf};break;
+  }
+  for(size_t i=0;i<tensors.size();++i) {
+    auto op=tensors[i];
+    assert(op->input_map.x==partitions[i] && op->input_map.y==-1 && op->input_map.z==-1);
+    assert(op->dtensor.data_type==dtypes[i]);
+    if(!shapes.empty()) {
+      assert(op->dtensor.num_dims==int(shapes[i].size()));
+      for(size_t j=0;j<shapes[i].size();++j) assert(op->dtensor.dim[j]==shapes[i][j]);
+    }
+  }
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  int tasks=64;
+  if (kind == 0) code.e("kernel::qwen35_embed_task<bfloat16,248320,$>(",h);
+  else if (kind == 1) code.e("kernel::qwen35_prefill_norm_task<bfloat16,$>(",h);
+  else if (kind == 2) {
+    auto const &x=tensors[0]->dtensor;
+    auto const &w=tensors[1]->dtensor;
+    auto const &y=tensors[3]->dtensor;
+    assert(x.num_dims==2 && w.num_dims==2 && y.num_dims==2);
+    assert(x.dim[0]==64 && y.dim[0]==64 && x.dim[1]==w.dim[1] && w.dim[0]==y.dim[1]);
+    assert(y.dim[1]%64==0);
+    tasks=y.dim[1]/64;
+    code.e("kernel::qwen35_prefill_linear_dispatch<bfloat16,$,$>(",x.dim[1],y.dim[1]);
+  } else if (kind == 3) {
+    tasks=channels/128;
+    code.e("kernel::qwen35_prefill_conv_task<bfloat16,$>(",channels);
+  } else if (kind == 11) {
+    tasks=vh;
+    auto dtype=tensors[4]->dtensor.data_type;
+    assert(dtype==type::DT_BFLOAT16 || dtype==type::DT_FLOAT32);
+    auto norm_type=dtype==type::DT_FLOAT32 ? "float" : "bfloat16";
+    code.e("kernel::qwen35_prefill_delta_grouped_task<bfloat16,$,$,$,$>(",norm_type,vh,kh,ab_width);
+  } else if (kind == 5) code.e("kernel::qwen35_prefill_qk_rope_task<bfloat16,$,$>(",qh,kvh);
+  else if (kind == 6) {
+    tasks=1;
+    code.e("kernel::qwen35_prefill_kv_task<bfloat16,$>(",kvh);
+  } else if (kind == 7) {
+    tasks=rows;
+    code.e("kernel::$<bfloat16,1024,$,$>(",params[1] ? "qwen35_prefill_sdpa_task" : "qwen35_prefill_eager_task",kvh,qh/kvh);
+  } else if (kind == 8) code.e("kernel::qwen35_prefill_silu_task<bfloat16,$>(",mid);
+  else if (kind == 9) code.e("kernel::qwen35_prefill_add_task<bfloat16,$>(",h);
+  else {
+    tasks=1;
+    code.e("kernel::qwen35_prefill_last_task<bfloat16,$>(",h);
+  }
+  assert(bgraph.grid_dim.x==tasks);
+  for (int i=0;i<inputs[kind];++i) code.e("task_desc->input_ptrs[$],",i);
+  for (int i=0;i<outputs[kind];++i)
+    code.e("task_desc->output_ptrs[$]$",i,i==outputs[kind]-1 ? ");" : ",");
+  return register_task_variant(TASK_QWEN35_PREFILL,code.to_string());
+}
+
+int TaskRegister::register_qwen35_down_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.empty() && bgraph.operators.size() == 3);
+  auto weight = static_cast<tb::TBInputOp *>(bgraph.operators[1]);
+  int n=weight->dtensor.dim[0], k=weight->dtensor.dim[1];
+  assert(k==5120 && (n==128 || n==1024));
+  assert(bgraph.grid_dim.x == n/64 && bgraph.grid_dim.y == 1 && bgraph.grid_dim.z == 1);
+  assert(bgraph.block_dim.x == 256 && bgraph.block_dim.y == 1 && bgraph.block_dim.z == 1);
+  std::vector<std::vector<int>> shapes = {{1,k}, {n,k}, {1,n}};
+  int partitions[] = {-1, 0, 1};
+  for (size_t i = 0; i < shapes.size(); ++i) {
+    assert(bgraph.operators[i]->op_type == type::TB_INPUT_OP);
+    auto op = static_cast<tb::TBInputOp *>(bgraph.operators[i]);
+    auto const &t = op->dtensor;
+    assert(t.num_dims == 2 && t.data_type == type::DT_BFLOAT16);
+    assert(t.dim[0] == shapes[i][0] && t.dim[1] == shapes[i][1]);
+    assert(t.stride[1] == 1 && t.stride[0] == shapes[i][1]);
+    assert(op->input_map.x == partitions[i] && op->input_map.y == -1 && op->input_map.z == -1);
+  }
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::qwen35_prefill_linear_task<bfloat16,5120,$,1,3,1728>(task_desc->input_ptrs[0], task_desc->input_ptrs[1], task_desc->output_ptrs[0]);",n);
+  return register_task_variant(TASK_QWEN35_DOWN, code.to_string());
+}
+
+// Qwen fixed batches add a request axis to the task grid. The runtime
+// offsets each private tensor along input_map.y before invoking the existing
+// one-request device routine. Normalize metadata only for shape validation
+// and template specialization; the graph retains the full batched geometry.
+static kn::DTensor qwen35_row_tensor(tb::TBInputOp const *op) {
+  kn::DTensor t = op->dtensor;
+  if (op->input_map.y == 0) {
+    if (t.num_dims <= 2) {
+      t.dim[0] = 1; // [B, width] or [B] -> one activation/token row
+    } else {
+      --t.num_dims; // [B, heads, ...] -> one private state/heads tensor
+      for (int d = 0; d < t.num_dims; ++d) {
+        t.dim[d] = t.dim[d+1];
+        t.stride[d] = t.stride[d+1];
+      }
+    }
+  }
+  return t;
+}
+
+static int qwen35_row_partition(tb::TBInputOp const *op) {
+  int dim = op->input_map.x;
+  return dim >= 0 && op->input_map.y == 0 && op->dtensor.num_dims > 2 ? dim - 1 : dim;
+}
+
+int TaskRegister::register_qwen38_runtime_position_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.empty() && bgraph.operators.size() == 4);
+  assert(bgraph.grid_dim.x == 1 && (bgraph.grid_dim.y == 1 || bgraph.grid_dim.y == 8) && bgraph.grid_dim.z == 1);
+  assert(bgraph.block_dim.x == 256 && bgraph.block_dim.y == 1 && bgraph.block_dim.z == 1);
+  int ranks[] = {1, 3, 1, 2};
+  int dims[][3] = {{int(bgraph.grid_dim.y), 0, 0}, {1024, 2, 64}, {1, 0, 0}, {2, 64, 0}};
+  type::DataType dtypes[] = {type::DT_INT32, type::DT_BFLOAT16,
+                             type::DT_INT64, type::DT_BFLOAT16};
+  for (int i = 0; i < 4; ++i) {
+    assert(bgraph.operators[i]->op_type == type::TB_INPUT_OP);
+    auto op = static_cast<tb::TBInputOp *>(bgraph.operators[i]);
+    auto t = i >= 2 ? qwen35_row_tensor(op) : op->dtensor;
+    assert(t.num_dims == ranks[i] && t.data_type == dtypes[i]);
+    int stride = 1;
+    for (int d = ranks[i] - 1; d >= 0; --d) {
+      assert(t.dim[d] == dims[i][d] && t.stride[d] == stride);
+      stride *= dims[i][d];
+    }
+    assert(op->input_map.x == -1 && op->input_map.z == -1);
+    assert(op->input_map.y == (i >= 2 && bgraph.grid_dim.y > 1 ? 0 : -1));
+  }
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{ int slot = task_desc->task_metadata.request_id;");
+  code.e("  int request = runtime_config.request_ids[slot];");
+  code.e("  if (request >= 0) kernel::qwen38_runtime_position_task<bfloat16>(runtime_config.step + request, task_desc->input_ptrs[1], task_desc->output_ptrs[0], task_desc->output_ptrs[1]);");
+  code.e("}");
+  return register_task_variant(TASK_QWEN38_RUNTIME_POSITION, code.to_string());
+}
+
+int TaskRegister::register_qwen35_model_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 1 && (params[0] == 0 || params[0] == 1));
+  bool embed = params[0] == 0;
+  assert(bgraph.operators.size() == (embed ? 3 : 2));
+  assert(bgraph.grid_dim.x == 1 && bgraph.grid_dim.y >= 1 && bgraph.grid_dim.y <= 32 && bgraph.grid_dim.z == 1);
+  assert(bgraph.block_dim.x == 256 && bgraph.block_dim.y == 1 && bgraph.block_dim.z == 1);
+  auto geometry = static_cast<tb::TBInputOp *>(bgraph.operators[embed ? 1 : 0]);
+  int vocab = qwen35_row_tensor(geometry).dim[embed ? 0 : 1];
+  int hidden = embed ? geometry->dtensor.dim[1] : 0;
+  assert(vocab == 248320 && (!embed || hidden == 5120 || hidden == 2048));
+  std::vector<std::vector<int>> shapes = embed ?
+      std::vector<std::vector<int>>{{1}, {vocab,hidden}, {1,hidden}} :
+      std::vector<std::vector<int>>{{1,vocab}, {1}};
+  for (size_t i = 0; i < shapes.size(); ++i) {
+    assert(bgraph.operators[i]->op_type == type::TB_INPUT_OP);
+    auto op = static_cast<tb::TBInputOp *>(bgraph.operators[i]);
+    auto t = qwen35_row_tensor(op);
+    assert(t.num_dims == int(shapes[i].size()));
+    int stride = 1;
+    for (int d = t.num_dims - 1; d >= 0; --d) {
+      assert(t.dim[d] == shapes[i][d] && t.stride[d] == stride);
+      stride *= t.dim[d];
+    }
+    assert(t.data_type == ((embed ? i == 0 : i == 1) ? type::DT_INT64 : type::DT_BFLOAT16));
+    assert(op->input_map.x == -1 && op->input_map.z == -1);
+    bool private_row = !(embed && i == 1);
+    assert(op->input_map.y == (bgraph.grid_dim.y > 1 && private_row ? 0 : -1));
+  }
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  if (embed)
+    code.e("kernel::qwen35_embed_task<bfloat16, $, $>(task_desc->input_ptrs[0], task_desc->input_ptrs[1], task_desc->output_ptrs[0]);", vocab, hidden);
+  else
+    code.e("kernel::qwen35_argmax_task<bfloat16, $>(task_desc->input_ptrs[0], task_desc->output_ptrs[0]);", vocab);
+  return register_task_variant(embed ? TASK_QWEN35_EMBED : TASK_QWEN35_ARGMAX, code.to_string());
+}
+
+int TaskRegister::register_qwen36_shared_gate_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.empty() && bgraph.operators.size() == 3);
+  assert(bgraph.grid_dim.x == 1 && (bgraph.grid_dim.y == 1 || bgraph.grid_dim.y == 8));
+  std::vector<std::vector<int>> shapes = {{1, 64}, {1, 2048}, {1, 2048}};
+  for (int i = 0; i < 3; ++i) {
+    assert(bgraph.operators[i]->op_type == type::TB_INPUT_OP);
+    auto op = static_cast<tb::TBInputOp *>(bgraph.operators[i]);
+    auto t = qwen35_row_tensor(op);
+    assert(t.num_dims == int(shapes[i].size()) && t.data_type == type::DT_BFLOAT16);
+    for (int d = 0; d < t.num_dims; ++d) assert(t.dim[d] == shapes[i][d]);
+    assert(op->input_map.x == -1 && op->input_map.z == -1);
+    assert(op->input_map.y == (bgraph.grid_dim.y > 1 ? 0 : -1));
+  }
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::qwen36_shared_gate_task<bfloat16,2048>(task_desc->input_ptrs[0], task_desc->input_ptrs[1], task_desc->output_ptrs[0]);");
+  return register_task_variant(TASK_QWEN36_SHARED_GATE, code.to_string());
+}
+
+int TaskRegister::register_qwen36_moe_sum_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.empty() && bgraph.operators.size() == 5);
+  assert(bgraph.grid_dim.x == 1 && bgraph.grid_dim.y == 1 && bgraph.grid_dim.z == 1);
+  assert(bgraph.block_dim.x == 256 && bgraph.block_dim.y == 1 && bgraph.block_dim.z == 1);
+  auto input = static_cast<tb::TBInputOp *>(bgraph.operators[0]);
+  int batch = input->dtensor.dim[0];
+  assert(batch == 1 || batch == 8);
+  std::vector<std::vector<int>> shapes = {{batch, 8, 2048}, {batch, 8},
+                                          {256, batch}, {batch, 2048}, {batch, 2048}};
+  type::DataType dtypes[] = {type::DT_BFLOAT16, type::DT_FLOAT32,
+                             type::DT_INT32, type::DT_BFLOAT16, type::DT_BFLOAT16};
+  for (int i = 0; i < 5; ++i) {
+    assert(bgraph.operators[i]->op_type == type::TB_INPUT_OP);
+    auto op = static_cast<tb::TBInputOp *>(bgraph.operators[i]);
+    auto const &t = op->dtensor;
+    assert(t.num_dims == int(shapes[i].size()) && t.data_type == dtypes[i]);
+    int stride = 1;
+    for (int d = t.num_dims - 1; d >= 0; --d) {
+      assert(t.dim[d] == shapes[i][d] && t.stride[d] == stride);
+      stride *= t.dim[d];
+    }
+    assert(op->input_map.x == -1 && op->input_map.y == -1 && op->input_map.z == -1);
+  }
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::qwen36_moe_sum_task<bfloat16,$,8,2048,256>(task_desc->input_ptrs[0], task_desc->input_ptrs[1], task_desc->input_ptrs[2], task_desc->input_ptrs[3], task_desc->output_ptrs[0]);", batch);
+  return register_task_variant(TASK_QWEN36_MOE_SUM, code.to_string());
+}
+
+int TaskRegister::register_qwen35_attention_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert((params.size() == 1 || params.size() == 2) && params[0] >= 0 && params[0] <= 3);
+  int kind = params[0];
+  bool offline = params.size() == 2 && params[1] == 1;
+  assert(!offline || kind != 0);
+  int inputs[] = {5, 3, 6, 6}, outputs[] = {3, 2, 2, 2};
+  TaskType types[] = {TASK_QWEN35_QK_ROPE, TASK_QWEN35_KV_STORE, TASK_QWEN35_ATTENTION,
+                      TASK_QWEN35_ATTENTION};
+  auto tensor = [&](int i) {
+    return qwen35_row_tensor(static_cast<tb::TBInputOp *>(bgraph.operators[i]));
+  };
+  int qh = kind == 1 ? 0 : tensor(0).dim[0];
+  int kvh = kind == 0 ? tensor(1).dim[0] : (kind == 1 ? tensor(0).dim[0] : tensor(3).dim[1]);
+  assert(kvh == 4 || kvh == 2);
+  assert(kind == 1 || qh == (kvh == 4 ? 24 : 16));
+  assert(bgraph.operators.size() == size_t(inputs[kind] + outputs[kind]));
+  assert(bgraph.grid_dim.x == (kind >= 2 ? qh : 1));
+  assert(bgraph.grid_dim.y >= 1 && bgraph.grid_dim.y <= 32 && bgraph.grid_dim.z == 1);
+  assert(bgraph.block_dim.x == 256 && bgraph.block_dim.y == 1 && bgraph.block_dim.z == 1);
+  std::vector<std::vector<int>> shapes;
+  if (kind == 0)
+    shapes = {{qh,512}, {kvh,256}, {256}, {256}, {2,64}, {qh,256}, {kvh,256}, {qh,256}};
+  else if (kind == 1)
+    shapes = {{kvh,256}, {kvh,256}, {1}, {1024,kvh,256}, {1024,kvh,256}};
+  else
+    shapes = {{qh,256}, {qh,256}, {1}, {1024,kvh,256}, {1024,kvh,256}, {qh,1}, {qh,256}, {qh,1024}};
+  if (kind == 3) shapes[7] = {qh,4112};
+  for (size_t i = 0; i < shapes.size(); ++i) {
+    assert(bgraph.operators[i]->op_type == type::TB_INPUT_OP);
+    auto op = static_cast<tb::TBInputOp *>(bgraph.operators[i]);
+    auto t = qwen35_row_tensor(op);
+    assert(t.num_dims == int(shapes[i].size()));
+    int stride = 1;
+    for (int d = t.num_dims - 1; d >= 0; --d) {
+      assert(t.dim[d] == shapes[i][d] && t.stride[d] == stride);
+      stride *= t.dim[d];
+    }
+    auto dtype = type::DT_BFLOAT16;
+    if (kind == 0 && (i == 2 || i == 3)) dtype = type::DT_FLOAT32;
+    if (kind == 3 && i == 7) dtype = type::DT_FLOAT32;
+    if ((kind != 0 && i == 2) || (kind >= 2 && i == 5)) dtype = type::DT_INT64;
+    assert(t.data_type == dtype);
+    int partition = kind >= 2 && (i == 0 || i == 1 || i == 5 || i == 6 || i == 7) ? 0 : -1;
+    bool shared = (kind == 0 && (i == 2 || i == 3)) || (kind >= 2 && i == 5) ||
+                  (offline && ((kind == 1 && (i == 3 || i == 4)) ||
+                               (kind >= 2 && (i == 3 || i == 4))));
+    assert(qwen35_row_partition(op) == partition && op->input_map.z == -1);
+    assert(op->input_map.y == (bgraph.grid_dim.y > 1 && !shared ? 0 : -1));
+  }
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  if (offline) {
+    code.e("int slot = task_desc->task_metadata.request_id;");
+    code.e("if (runtime_config.request_ids[slot] >= 0) {");
+    code.e("int page = runtime_config.paged_kv_indices_buffer[0][runtime_config.paged_kv_indptr_buffer[0][slot]];");
+    code.e("if (page < 0 || page >= MPK_MAX_NUM_PAGES) __trap();");
+  }
+  if (kind == 0) code.e("kernel::qwen35_qk_rope_task<bfloat16,$,$,$>(", qh, kvh, bgraph.grid_dim.y);
+  else if (kind == 1) code.e("kernel::qwen35_kv_store_task<bfloat16,1024,$>(", kvh);
+  else if (kind == 2) code.e("kernel::qwen35_attention_task<bfloat16,1024,false,$,$>(", kvh, qh/kvh);
+  else code.e("kernel::qwen35_sdpa_attention_task<bfloat16,1024,$,$>(", kvh, qh/kvh);
+  for (int i = 0; i < inputs[kind]; ++i) {
+    if (offline && kind >= 2 && (i == 3 || i == 4))
+      code.e("    static_cast<bfloat16 const *>(task_desc->input_ptrs[$]) + page * 2 * 1024 * $ * 256,", i, kvh);
+    else
+      code.e("    task_desc->input_ptrs[$],", i);
+  }
+  for (int i = 0; i < outputs[kind]; ++i) {
+    if (offline && kind == 1)
+      code.e("    static_cast<bfloat16 *>(task_desc->output_ptrs[$]) + page * 2 * 1024 * $ * 256$", i, kvh,
+             i == outputs[kind] - 1 ? ");" : ",");
+    else
+      code.e("    task_desc->output_ptrs[$]$", i,
+             i == outputs[kind] - 1 && kind != 2 ? ");" : ",");
+  }
+  if (kind == 2) code.e("    $);", bgraph.grid_dim.y);
+  if (offline) code.e("}");
+  return register_task_variant(types[kind], code.to_string());
+}
+
+int TaskRegister::register_qwen35_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 1 && (params[0] == 0 || params[0] == 1 || params[0] == 3));
+  int kind = params[0];
+  int inputs = kind == 0 ? 2 : (kind == 1 ? 3 : 8);
+  int outputs = kind >= 2 ? 2 : 1;
+  assert(bgraph.operators.size() == (size_t)(inputs + outputs));
+  for (auto op : bgraph.operators) assert(op->op_type == type::TB_INPUT_OP);
+  auto x = static_cast<tb::TBInputOp *>(bgraph.operators[0]);
+  auto row = qwen35_row_tensor(x);
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  TaskType type;
+  if (kind == 0) {
+    assert(row.num_dims == 2 && row.dim[0] == 1);
+    assert(bgraph.grid_dim.x == 1);
+    code.e("kernel::qwen35_norm_task<bfloat16, $, $>(", row.dim[1], bgraph.grid_dim.y);
+    type = TASK_QWEN35_NORM;
+  } else if (kind == 1) {
+    assert(row.num_dims == 2 && row.dim[0] == 1);
+    assert(row.dim[1] % bgraph.grid_dim.x == 0);
+    code.e("kernel::qwen35_conv_task<bfloat16, $>(",
+           row.dim[1] / bgraph.grid_dim.x);
+    type = TASK_QWEN35_CONV;
+  } else {
+    int heads = bgraph.grid_dim.x;
+    int key_heads = (row.dim[0] - heads) / 2;
+    assert(heads == 48 || heads == 32);
+    assert(key_heads == 16 && heads % key_heads == 0 && bgraph.block_dim.x == 256);
+    assert(row.num_dims == 2 && row.dim[0] == 2*key_heads+heads);
+    assert(row.dim[1] == 128 && x->input_map.x == -1);
+    auto hid = static_cast<tb::TBInputOp *>(bgraph.operators[7]);
+    assert(hid->dtensor.data_type == type::DT_INT64 && hid->dtensor.dim[0] == heads);
+    assert(hid->dtensor.num_dims == 2 && hid->dtensor.dim[1] == 1 && hid->input_map.x == 0);
+    auto norm = static_cast<tb::TBInputOp *>(bgraph.operators[4]);
+    assert(norm->dtensor.data_type == type::DT_FLOAT32 ||
+           norm->dtensor.data_type == type::DT_BFLOAT16);
+    auto position = static_cast<tb::TBInputOp *>(bgraph.operators[6]);
+    auto pos = qwen35_row_tensor(position);
+    assert(pos.data_type == type::DT_INT64 && pos.num_dims == 1 && pos.dim[0] == 1);
+    code.e("kernel::qwen35_delta_grouped_task<bfloat16, $, $, $>(",
+           norm->dtensor.data_type == type::DT_FLOAT32 ? "float" : "bfloat16", heads, key_heads);
+    type = TASK_QWEN35_DELTA;
+  }
+  for (int i = 0; i < inputs; ++i)
+    code.e("    task_desc->input_ptrs[$],", i);
+  for (int i = 0; i < outputs; ++i)
+    code.e("    task_desc->output_ptrs[$]$", i, i == outputs - 1 ? ");" : ",");
+  return register_task_variant(type, code.to_string());
+}
+
 int TaskRegister::register_inkling_sconv_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params: []. 3 inputs (x [SEQ, hidden] bf16, weight [hidden, K] fp32,
@@ -748,6 +1162,11 @@ int TaskRegister::register_silu_mul_task(threadblock::Graph const &bgraph,
     }
   }
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  if (bgraph.grid_dim.y > 1) {
+    assert(bgraph.grid_dim.x == 1);
+    assert(input_ops[0]->input_map.y == 0 && output_ops[0]->input_map.y == 0);
+    assert(input_ops[0]->input_map.x == -1 && output_ops[0]->input_map.x == -1);
+  }
   batch_size = output_ops[0]->output_tensors[0].dim[0];
   output_size = output_ops[0]->output_tensors[0].dim[1];
   assert(input_ops[0]->dtensor.num_dims == 2);
@@ -771,7 +1190,10 @@ int TaskRegister::register_silu_mul_task(threadblock::Graph const &bgraph,
          output_stride);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->output_ptrs[0],");
-  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
+  if (bgraph.grid_dim.y > 1)
+    code.e("    1);");
+  else
+    code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
   return register_task_variant(TASK_SILU_MUL, code.to_string());
 }
 
@@ -2165,7 +2587,8 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
   code.e("    tma_a,");
   code.e("    tma_b,");
   code.e("    mBias,");
-  code.e("    tma_out); ");
+  code.e("    tma_out,");
+  code.e("    task_desc->output_ptrs[0]); ");
 
   if (with_residual) {
     return register_task_variant(TASK_LINEAR_WITH_RESIDUAL_SM100,
@@ -2318,7 +2741,8 @@ int TaskRegister::register_splitk_linear_sm100_task(
   code.e("    tma_a,");
   code.e("    tma_b,");
   code.e("    mBias,");
-  code.e("    tma_out); ");
+  code.e("    tma_out,");
+  code.e("    task_desc->output_ptrs[0]); ");
 
   return register_task_variant(TASK_SPLITK_LINEAR_SM100, code.to_string());
 }
@@ -2865,7 +3289,7 @@ int TaskRegister::register_prob_scatter_sm100_task(
 
 int TaskRegister::register_moe_topk_softmax_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  assert(params.size() == 0);
+  assert(params.empty() || (params.size() == 1 && params[0] == 1));
   int batch_size = 0, num_experts = 0, num_experts_per_tok = 0, input_stride,
       output_stride;
   std::vector<tb::TBInputOp *> input_ops;
@@ -2928,7 +3352,7 @@ int TaskRegister::register_moe_topk_softmax_sm100_task(
   code.e("    task_desc->output_ptrs[2],");
   code.e("    0,");
   code.e("    $,", num_experts);
-  code.e("    true);");
+  code.e("    true, $);", params.empty() ? "false" : "true");
   return register_task_variant(TASK_MOE_TOPK_SOFTMAX_SM100, code.to_string());
 }
 

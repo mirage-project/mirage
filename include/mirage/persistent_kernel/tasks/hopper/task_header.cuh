@@ -24,7 +24,14 @@
 
 #include "tasks/blackwell/argmax_sm100.cuh"
 #include "tasks/blackwell/attention_sm100.cuh"
+// Scalar BF16 residual addition is also valid on Hopper.
+#include "tasks/blackwell/elementwise_add_sm100.cuh"
 // arch-agnostic scalar kernel (GLM-4.x router), shared with the sm100 build
 #include "tasks/blackwell/glm_moe_router_sm100.cuh"
 #include "tasks/blackwell/mul_sum_add_sm100.cuh"
 #include "tasks/blackwell/topk_softmax_sm100.cuh"
+// Shared scalar Qwen3.5 tasks; projections use the Hopper GEMM path.
+#include "tasks/common/qwen35_gdn.cuh"
+#include "tasks/common/qwen35_attention.cuh"
+#include "tasks/common/qwen35_model.cuh"
+#include "tasks/common/qwen35_prefill.cuh"

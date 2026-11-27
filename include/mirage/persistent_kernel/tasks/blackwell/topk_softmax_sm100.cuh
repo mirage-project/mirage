@@ -77,7 +77,8 @@ __device__ __forceinline__ void topk_softmax_task_impl(
                                                   // experts
     int const start_expert,
     int const end_expert,
-    bool const renormalize) {
+    bool const renormalize,
+    bool const round_weights_to_bf16 = false) {
   // Pointers
   T *input = static_cast<T *>(input_ptr);
   float *output = static_cast<float *>(output_ptr);
@@ -129,6 +130,139 @@ __device__ __forceinline__ void topk_softmax_task_impl(
                     THREADS_PER_ROW == WARP_SIZE / 2,
                 "This kernel only supports THREADS_PER_ROW of 16 or 32");
 
+  // Qwen3.6 rounds the eight renormalized routing weights to BF16. A one-ULP
+  // FP32 softmax difference can change that result at a BF16 midpoint. For
+  // its 256 experts, reproduce PyTorch's installed PersistentSoftmax layout:
+  // one 32-lane warp per row, eight elements per lane at stride 32, then XOR
+  // reductions from lane distance 16 to 1. Reuse the worker's dynamic shared
+  // memory instead of increasing its static shared-memory footprint.
+  bool const torch_style = round_weights_to_bf16 && num_rows <= 2 * WARPS_PER_CTA &&
+                           NUM_EXPERTS == 256 && THREADS_PER_ROW == WARP_SIZE &&
+                           k == 8 && start_expert == 0 && end_expert == 256;
+  extern __shared__ float qwen36_torch_probabilities[];
+  if (torch_style) {
+    // B16 uses two waves of eight warps. Preserve the same per-row
+    // PyTorch softmax and small-sort order used by B8.
+    for (int row_block = 0; row_block < num_rows; row_block += WARPS_PER_CTA) {
+    int row = row_block + threadIdx.x / WARP_SIZE;
+    int lane = threadIdx.x % WARP_SIZE;
+    if (row < num_rows) {
+      float elements[8];
+      float peak = -INFINITY;
+      #pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        elements[i] = float(input[row * NUM_EXPERTS + lane + WARP_SIZE * i]);
+        peak = peak > elements[i] ? peak : elements[i];
+      }
+      for (int offset = WARP_SIZE / 2; offset; offset >>= 1)
+        peak = fmaxf(peak, __shfl_xor_sync(0xffffffff, peak, offset));
+      float sum = 0.f;
+      #pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        elements[i] = expf(elements[i] - peak);
+        sum = __fadd_rn(sum, elements[i]);
+      }
+      for (int offset = WARP_SIZE / 2; offset; offset >>= 1)
+        sum = __fadd_rn(sum, __shfl_xor_sync(0xffffffff, sum, offset));
+      #pragma unroll
+      for (int i = 0; i < 8; ++i)
+        qwen36_torch_probabilities[row * NUM_EXPERTS + lane + WARP_SIZE * i] =
+            __fdiv_rn(elements[i], sum);
+    }
+    __syncthreads();
+
+    // PyTorch 2.7 gatherTopK first collects all values above the kth value in
+    // expert-index order, then the first equal values needed to fill eight
+    // slots. Its small-sort path applies a 32-element bitonic network to
+    // these eight valid entries. The network's tie order affects the BF16
+    // expert accumulation even when the eight weights are identical.
+    if (threadIdx.x % WARP_SIZE == 0 && row < num_rows) {
+      float const *probs = qwen36_torch_probabilities + row * NUM_EXPERTS;
+      float highest[8];
+      #pragma unroll
+      for (int j = 0; j < 8; ++j) highest[j] = -INFINITY;
+      for (int expert = 0; expert < NUM_EXPERTS; ++expert) {
+        float v = probs[expert];
+        for (int j = 0; j < 8; ++j) {
+          if (v > highest[j]) {
+            for (int next = 7; next > j; --next)
+              highest[next] = highest[next - 1];
+            highest[j] = v;
+            break;
+          }
+        }
+      }
+      float threshold = highest[7];
+      float keys[32] = {};
+      int experts[32] = {};
+      bool valid[32] = {};
+      int count = 0;
+      for (int expert = 0; expert < NUM_EXPERTS; ++expert) {
+        if (probs[expert] > threshold) {
+          keys[count] = probs[expert];
+          experts[count] = expert;
+          valid[count++] = true;
+        }
+      }
+      for (int expert = 0; expert < NUM_EXPERTS && count < 8; ++expert) {
+        if (probs[expert] == threshold) {
+          keys[count] = probs[expert];
+          experts[count] = expert;
+          valid[count++] = true;
+        }
+      }
+      for (int size = 2; size < 32; size *= 2) {
+        for (int stride = size / 2; stride > 0; stride /= 2) {
+          for (int thread = 0; thread < 16; ++thread) {
+            int p = 2 * thread - (thread & (stride - 1));
+            int q = p + stride;
+            bool dir = (thread & (size / 2)) != 0;
+            bool swap = ((keys[p] > keys[q] && valid[p]) || !valid[q]);
+            if (swap == dir) {
+              float tmp_key = keys[p]; keys[p] = keys[q]; keys[q] = tmp_key;
+              int tmp_expert = experts[p]; experts[p] = experts[q]; experts[q] = tmp_expert;
+              bool tmp_valid = valid[p]; valid[p] = valid[q]; valid[q] = tmp_valid;
+            }
+          }
+        }
+      }
+      for (int stride = 16; stride > 0; stride /= 2) {
+        for (int thread = 0; thread < 16; ++thread) {
+          int p = 2 * thread - (thread & (stride - 1));
+          int q = p + stride;
+          bool swap = ((keys[p] > keys[q] && valid[p]) || !valid[q]);
+          if (!swap) {
+            float tmp_key = keys[p]; keys[p] = keys[q]; keys[q] = tmp_key;
+            int tmp_expert = experts[p]; experts[p] = experts[q]; experts[q] = tmp_expert;
+            bool tmp_valid = valid[p]; valid[p] = valid[q]; valid[q] = tmp_valid;
+          }
+        }
+      }
+      // torch.sum over eight FP32 values reduces adjacent pairs before
+      // combining the two halves. A sequential sum can move a normalized
+      // value across a BF16 midpoint even when the top-k probabilities agree.
+      float pair0 = __fadd_rn(keys[0], keys[1]);
+      float pair1 = __fadd_rn(keys[2], keys[3]);
+      float pair2 = __fadd_rn(keys[4], keys[5]);
+      float pair3 = __fadd_rn(keys[6], keys[7]);
+      float selected_sum = __fadd_rn(__fadd_rn(pair0, pair1),
+                                     __fadd_rn(pair2, pair3));
+      bool row_active = finished ? !finished[row] : true;
+      for (int j = 0; j < 8; ++j) {
+        float weight = renormalize ? __fdiv_rn(keys[j], selected_sum) : keys[j];
+        output[row * 8 + j] = round_weights_to_bf16 ? float(T(weight)) : weight;
+        int expert = experts[j];
+        if (row_active && mpk_routing_indices != nullptr)
+          mpk_routing_indices[expert * num_rows + row] = j + 1;
+        if (row_active && mpk_active_expert_ids != nullptr)
+          mpk_active_expert_ids[expert] = expert;
+      }
+    }
+    __syncthreads();
+    }
+    for (int i = threadIdx.x; i < num_rows * NUM_EXPERTS; i += blockDim.x)
+      input[i] = T(0.f);
+  } else {
   // Work partitioning
   static constexpr int ELTS_PER_WARP = WARP_SIZE * VPT;
   static constexpr int ROWS_PER_WARP =
@@ -183,7 +317,12 @@ __device__ __forceinline__ void topk_softmax_task_impl(
 
       float row_chunk[VPT];
       for (int ii = 0; ii < VPT; ++ii) {
-        row_chunk[ii] = converter(row_chunk_temp[ii]);
+        int col = first_elt_read_by_thread +
+                  (ii / ELTS_PER_LDG) * ELTS_PER_LDG * THREADS_PER_ROW +
+                  ii % ELTS_PER_LDG;
+        row_chunk[ii] = torch_style
+            ? qwen36_torch_probabilities[thread_row * NUM_EXPERTS + col]
+            : converter(row_chunk_temp[ii]);
         row_chunk_temp[ii] = static_cast<T>(
             0); // reset input buffer to 0 for split-k gate linear
       }
@@ -193,30 +332,26 @@ __device__ __forceinline__ void topk_softmax_task_impl(
         vec_thread_read_ptr[ii * THREADS_PER_ROW] = row_chunk_vec_ptr[ii];
       }
 
-      // Max reduction within subgroup
-      float thread_max = row_chunk[0];
-      for (int ii = 1; ii < VPT; ++ii) {
-        thread_max = max(thread_max, row_chunk[ii]);
-      }
-      for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
-        float other =
-            __shfl_xor_sync(warp_mask, thread_max, mask, THREADS_PER_ROW);
-        thread_max = max(thread_max, other);
-      }
-
-      // Softmax numerator and sum within subgroup
-      float row_sum = 0.f;
-      for (int ii = 0; ii < VPT; ++ii) {
-        row_chunk[ii] = expf(row_chunk[ii] - thread_max);
-        row_sum += row_chunk[ii];
-      }
-      for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
-        row_sum += __shfl_xor_sync(warp_mask, row_sum, mask, THREADS_PER_ROW);
-      }
-
-      float const inv_row_sum = 1.f / row_sum;
-      for (int ii = 0; ii < VPT; ++ii) {
-        row_chunk[ii] = row_chunk[ii] * inv_row_sum;
+      if (!torch_style) {
+        // Existing fused path for models that do not round routing weights.
+        float thread_max = row_chunk[0];
+        for (int ii = 1; ii < VPT; ++ii)
+          thread_max = max(thread_max, row_chunk[ii]);
+        for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
+          float other =
+              __shfl_xor_sync(warp_mask, thread_max, mask, THREADS_PER_ROW);
+          thread_max = max(thread_max, other);
+        }
+        float row_sum = 0.f;
+        for (int ii = 0; ii < VPT; ++ii) {
+          row_chunk[ii] = expf(row_chunk[ii] - thread_max);
+          row_sum += row_chunk[ii];
+        }
+        for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2)
+          row_sum += __shfl_xor_sync(warp_mask, row_sum, mask, THREADS_PER_ROW);
+        float const inv_row_sum = 1.f / row_sum;
+        for (int ii = 0; ii < VPT; ++ii)
+          row_chunk[ii] = row_chunk[ii] * inv_row_sum;
       }
 
       // Fused Top-K selection within subgroup
@@ -297,20 +432,62 @@ __device__ __forceinline__ void topk_softmax_task_impl(
         for (int k_idx = 0; k_idx < k; ++k_idx) {
           int const out_idx = thread_row * k + k_idx;
           output[out_idx] = output[out_idx] * inv;
+          if (round_weights_to_bf16)
+            output[out_idx] = float(T(output[out_idx]));
         }
       }
     }
   }
+  }
   __syncthreads();
   // Compact marks into a dense list and count
   if (mpk_active_expert_ids != nullptr) {
-    for (int expert = start_expert + threadIdx.x; expert < end_expert;
-         expert += blockDim.x) {
-      int const local_expert = expert - start_expert;
-      int const mark = mpk_active_expert_ids[local_expert];
+    if (round_weights_to_bf16 && NUM_EXPERTS == 256 && WARPS_PER_CTA == 8 &&
+        blockDim.x == 256 && start_expert == 0 && end_expert == NUM_EXPERTS) {
+      // Qwen3.6's atomic compaction assigns the same experts to different
+      // expert-offset tasks on different launches. Give each active expert
+      // a stable rank in expert-id order. Every lane reads its mark before
+      // any lane overwrites the shared marks/list buffer.
+      __shared__ int warp_counts[WARPS_PER_CTA];
+      int lane = threadIdx.x % WARP_SIZE;
+      int warp = threadIdx.x / WARP_SIZE;
+      int mark = mpk_active_expert_ids[threadIdx.x];
+      unsigned int active = __ballot_sync(0xffffffffu, mark >= 0);
+      if (lane == 0) warp_counts[warp] = __popc(active);
+      __syncthreads();
+      int rank = __popc(active & ((1u << lane) - 1u));
+      for (int earlier = 0; earlier < warp; ++earlier)
+        rank += warp_counts[earlier];
+      if (mark >= 0) mpk_active_expert_ids[rank] = threadIdx.x;
+      if (threadIdx.x == 0) {
+        int count = 0;
+        for (int w = 0; w < WARPS_PER_CTA; ++w) count += warp_counts[w];
+        mpk_active_expert_ids[NUM_EXPERTS] = count;
+      }
+      __syncthreads();
+      return;
+    }
+    // The compacted list shares storage with the sparse marks. Read all
+    // marks before any lane overwrites an entry another lane still needs.
+    constexpr int MARKS_PER_THREAD =
+        (NUM_EXPERTS + WARPS_PER_CTA * WARP_SIZE - 1) /
+        (WARPS_PER_CTA * WARP_SIZE);
+    int marks[MARKS_PER_THREAD];
+    int const local_experts = end_expert - start_expert;
+    for (int i = 0; i < MARKS_PER_THREAD; ++i) {
+      int const local_expert = threadIdx.x + i * blockDim.x;
+      marks[i] = local_expert < local_experts
+                     ? mpk_active_expert_ids[local_expert]
+                     : -1;
+    }
+    __syncthreads();
+    for (int i = 0; i < MARKS_PER_THREAD; ++i) {
+      int const local_expert = threadIdx.x + i * blockDim.x;
+      if (local_expert >= local_experts) continue;
+      int const mark = marks[i];
       if (mark >= 0) {
         int const pos = atomicAdd(mpk_active_expert_ids + NUM_EXPERTS, 1);
-        mpk_active_expert_ids[pos] = expert;
+        mpk_active_expert_ids[pos] = start_expert + local_expert;
       }
     }
   }

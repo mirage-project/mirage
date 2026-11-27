@@ -338,7 +338,10 @@ class KVCachePlan:
                 f"outside [0x{lo:x}, 0x{hi:x})")
         want = self.page_stride_elems(tensor.dtype)
         got = tensor.stride(0)
-        if got != want:
+        # PyTorch may give a size-one page axis the compact component stride
+        # when it views a sliced K/V component. No second page is addressable
+        # through that axis, so its stride has no observable effect.
+        if tensor.shape[0] > 1 and got != want:
             raise AssertionError(
                 f"{name} has page stride {got}, expected {want}: it lives in "
                 f"the pool but is no longer addressed a whole page at a time.")
