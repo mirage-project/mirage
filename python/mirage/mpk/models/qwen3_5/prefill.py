@@ -20,7 +20,7 @@ It shares the decode graph's weights and writes its recurrent/KV buffers; no
 HF model, HF cache, tokenizer, or checkpoint reload participates at runtime.
 Keep prefill and decode backend names separate when reporting performance.
 
-The chunk-delta operation order is adapted from Transformers 5.14.1's
+The chunk-delta operation order is adapted from Transformers 5.19.0's
 ``models/qwen3_5/modeling_qwen3_5.py::torch_chunk_gated_delta_rule``. Padding,
 FP32 intermediates, BF16 boundaries and chunk size are numerical contracts.
 """
@@ -34,52 +34,48 @@ from .reference import gated_rms_norm, rms_norm
 def chunk_gated_delta(query, key, value, g, beta, initial_state=None):
     """BF16 [1, time, heads, dim] -> BF16 outputs and a new FP32 state.
 
-Use 64-token chunks even for short prompts. Do not substitute repeated
-single-token updates: that changes FP32 reductions before BF16 rounding.
-Inputs, including an optional initial recurrent state, are never modified.
-"""
+    Use 64-token chunks even for short prompts. Inputs and initial state are
+    never modified. The triangular solve matches the current HF fallback.
+    """
     chunk_size = 64
     dtype = query.dtype
-    query = query * torch.rsqrt((query * query).sum(-1, keepdim=True) + 1e-6)
-    key = key * torch.rsqrt((key * key).sum(-1, keepdim=True) + 1e-6)
     query, key, value, beta, g = [
-        x.transpose(1, 2).contiguous().float() for x in (query, key, value, beta, g)
+        x.transpose(1, 2).to(torch.float32, memory_format=torch.contiguous_format)
+        for x in (query, key, value, beta, g)
     ]
     batch, heads, length, key_dim = key.shape
     value_dim = value.shape[-1]
+    query = query * torch.rsqrt((query * query).sum(-1, keepdim=True) + 1e-6)
+    key = key * torch.rsqrt((key * key).sum(-1, keepdim=True) + 1e-6)
+    query = query * (key_dim ** -0.5)
     padding = (chunk_size - length % chunk_size) % chunk_size
     query, key, value = [F.pad(x, (0, 0, 0, padding)) for x in (query, key, value)]
     beta, g = [F.pad(x, (0, padding)) for x in (beta, g)]
-    query = query * (1 / (query.shape[-1] ** 0.5))
     value_beta = value * beta.unsqueeze(-1)
     key_beta = key * beta.unsqueeze(-1)
-    query, key, value, key_beta, value_beta = [
+    query, key, key_beta, value_beta = [
         x.reshape(batch, heads, -1, chunk_size, x.shape[-1])
-        for x in (query, key, value, key_beta, value_beta)
+        for x in (query, key, key_beta, value_beta)
     ]
     g = g.reshape(batch, heads, -1, chunk_size).cumsum(-1)
-    decay = ((g.unsqueeze(-1) - g.unsqueeze(-2)).tril().exp().float()).tril()
-    upper = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device))
-    correction = -((key_beta @ key.transpose(-1, -2)) * decay).masked_fill(upper, 0)
-    for row_idx in range(1, chunk_size):
-        row = correction[..., row_idx, :row_idx].clone()
-        previous = correction[..., :row_idx, :row_idx].clone()
-        correction[..., row_idx, :row_idx] = row + (row.unsqueeze(-1) * previous).sum(-2)
-    correction = correction + torch.eye(chunk_size, dtype=correction.dtype, device=correction.device)
-    value = correction @ value_beta
-    key_decay = correction @ (key_beta * g.exp().unsqueeze(-1))
+    upper = torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device).triu(1)
+    decay = (g.unsqueeze(-1) - g.unsqueeze(-2)).masked_fill(upper, float("-inf")).exp()
+    system = (key_beta @ key.transpose(-1, -2)) * decay
+    attention = (query @ key.transpose(-1, -2)) * decay
+    key_decay = key_beta * g.exp().unsqueeze(-1)
+    value = torch.linalg.solve_triangular(system, value_beta, upper=False, unitriangular=True)
+    key_decay = torch.linalg.solve_triangular(system, key_decay, upper=False, unitriangular=True)
     state = (torch.zeros(batch, heads, key_dim, value_dim, device=value.device, dtype=value.dtype)
              if initial_state is None else initial_state.to(value))
     output = torch.zeros_like(value)
+    query = query * g.exp().unsqueeze(-1)
+    key = key * (g[..., -1:] - g).exp().unsqueeze(-1)
+    chunk_decay = g[..., -1].exp()[..., None, None]
     for chunk in range((length + padding) // chunk_size):
         q, k, v = query[:, :, chunk], key[:, :, chunk], value[:, :, chunk]
-        attention = (q @ k.transpose(-1, -2)) * decay[:, :, chunk]
         residual_value = v - key_decay[:, :, chunk] @ state
-        previous_output = (q * g[:, :, chunk, :, None].exp()) @ state
-        output[:, :, chunk] = previous_output + attention @ residual_value
-        state = (state * g[:, :, chunk, -1, None, None].exp()
-                 + (k * (g[:, :, chunk, -1, None] - g[:, :, chunk]).exp()[..., None]).transpose(-1, -2)
-                 @ residual_value)
+        output[:, :, chunk] = q @ state + attention[:, :, chunk] @ residual_value
+        state = state * chunk_decay[:, :, chunk] + k.transpose(-1, -2) @ residual_value
     output = output.reshape(batch, heads, -1, value_dim)[:, :, :length]
     return output.transpose(1, 2).contiguous().to(dtype), state
 

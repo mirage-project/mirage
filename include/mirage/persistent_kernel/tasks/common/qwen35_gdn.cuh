@@ -170,17 +170,34 @@ __device__ __forceinline__ void qwen35_delta_task(
   auto raw = static_cast<T *>(raw_output);
   __shared__ float q[D], k[D], q_inv, k_inv, decay, beta, initial_qk;
   static_assert(D == 128);
+#if defined(MODE_OFFLINE) && MPK_MAX_NUM_BATCHED_REQUESTS == 8
+  // Match the current HF tokenwise oracle in the experimental dense B8 path.
+  // Preserve the separately validated B1, MoE, and fixed-batch contracts.
+  constexpr bool FP32_QK_NORM = HEADS == 48 && KEY_HEADS == 16;
+#else
+  constexpr bool FP32_QK_NORM = false;
+#endif
   float qsq = 0.f, ksq = 0.f;
   if (threadIdx.x < D) {
     float qv = float(qx[threadIdx.x]), kv = float(kx[threadIdx.x]);
-    qsq = float(T(__fmul_rn(qv, qv)));
-    ksq = float(T(__fmul_rn(kv, kv)));
+    if constexpr (FP32_QK_NORM) {
+      qsq = __fmul_rn(qv, qv);
+      ksq = __fmul_rn(kv, kv);
+    } else {
+      qsq = float(T(__fmul_rn(qv, qv)));
+      ksq = float(T(__fmul_rn(kv, kv)));
+    }
   }
   float qs = qwen35_sum_128(qsq), ks = qwen35_sum_128(ksq);
   if (threadIdx.x == 0) {
-    // HF 5.14.1 performs Q/K L2 normalization before widening to FP32.
-    q_inv = float(T(rsqrtf(float(T(float(T(qs)) + 1.e-6f)))));
-    k_inv = float(T(rsqrtf(float(T(float(T(ks)) + 1.e-6f)))));
+    if constexpr (FP32_QK_NORM) {
+      q_inv = rsqrtf(__fadd_rn(qs, 1.e-6f));
+      k_inv = rsqrtf(__fadd_rn(ks, 1.e-6f));
+    } else {
+      // HF 5.14.1 normalizes Q/K before widening to FP32.
+      q_inv = float(T(rsqrtf(float(T(float(T(qs)) + 1.e-6f)))));
+      k_inv = float(T(rsqrtf(float(T(float(T(ks)) + 1.e-6f)))));
+    }
     float dt = float(abv[0]) + p[HEADS];
     float softplus = dt > 20.f ? dt : log1pf(expf(dt));
     decay = expf(-expf(p[0]) * softplus);
@@ -189,8 +206,13 @@ __device__ __forceinline__ void qwen35_delta_task(
   __syncthreads();
   if (threadIdx.x < D) {
     int i = threadIdx.x;
-    q[i] = float(T(__fmul_rn(float(qx[i]), q_inv))) * rsqrtf(float(D));
-    k[i] = float(T(__fmul_rn(float(kx[i]), k_inv)));
+    if constexpr (FP32_QK_NORM) {
+      q[i] = __fmul_rn(__fmul_rn(float(qx[i]), q_inv), rsqrtf(float(D)));
+      k[i] = __fmul_rn(float(kx[i]), k_inv);
+    } else {
+      q[i] = float(T(__fmul_rn(float(qx[i]), q_inv))) * rsqrtf(float(D));
+      k[i] = float(T(__fmul_rn(float(kx[i]), k_inv)));
+    }
   }
   __syncthreads();
   // With one valid token and an empty cache, HF's padded chunk algorithm

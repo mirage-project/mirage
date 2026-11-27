@@ -64,13 +64,15 @@ def test_grouped_prefill_agrees_with_independent_recurrent_updates():
         expected.append(F.linear(gated,t["out_weight"]))
     actual,cache=_gdn(x,t,c,0)
     torch.testing.assert_close(actual,torch.stack(expected,1),rtol=.03,atol=2e-5)
-    torch.testing.assert_close(cache["state"],state[0],rtol=.01,atol=1e-6)
+    # The chunked triangular solve and tokenwise recurrence differ slightly
+    # in FP32 order, including at state entries whose reference is near zero.
+    torch.testing.assert_close(cache["state"],state[0],rtol=.01,atol=2e-5)
     torch.testing.assert_close(cache["conv_state"],history[0],rtol=0,atol=0)
     first,new=_gdn(x[:,:3],t,c,0)
     t.update(new)
     rest,last=_gdn(x[:,3:],t,c,3)
     torch.testing.assert_close(torch.cat((first,rest),1),actual,rtol=.03,atol=2e-5)
-    torch.testing.assert_close(last["state"],cache["state"],rtol=.01,atol=1e-6)
+    torch.testing.assert_close(last["state"],cache["state"],rtol=.01,atol=2e-5)
 
 
 def test_27b_gqa_prefill_and_cached_continuation():
