@@ -197,8 +197,11 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
       sizeof(float) * MMA_ITERS_M * NUM_THREADS * 2;
 
   constexpr size_t S_O_BUFFER_OFFSET = S_D_BUFFER_OFFSET + S_D_BUFFER_SIZE;
+  // Per-thread row of 64 floats, padded by 16 bytes so the lanes of one
+  // STS.128 do not all fall in the same bank group (32-way conflict).
+  constexpr int S_O_STRIDE = 64 + 4;
   constexpr size_t S_O_BUFFER_SIZE =
-      sizeof(float) * MMA_ITERS_M * NUM_THREADS * 64;
+      sizeof(float) * MMA_ITERS_M * NUM_THREADS * S_O_STRIDE;
 
   // stage3 output buffer
   constexpr size_t S_O_OFFSET = S_O_BUFFER_OFFSET + S_O_BUFFER_SIZE;
@@ -231,8 +234,10 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
 
   // STensors' layouts
   using ZeroBufferSmem = smem_row<T, 0, 0, 0, 1, 8, 8>;
+  // S=4 XORs all 16 chunks of a 128-col row, so the 8 rows of an ldmatrix
+  // phase land in 8 different bank groups (3,3,3 left them 2-way).
   using QOSmem =
-      smem_row<T, 3, 3, 3, MAX_TOKENS * NUM_QO_PER_KV, HEAD_DIM, HEAD_DIM>;
+      smem_row<T, 3, 3, 4, MAX_TOKENS * NUM_QO_PER_KV, HEAD_DIM, HEAD_DIM>;
   using KVSmem = smem_row_tiled<T, 3, 3, 3, KV_TILE_SIZE, HEAD_DIM, HEAD_DIM>;
 
   ZeroBufferSmem zero_buffer(zero_buf);
@@ -594,8 +599,8 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
     for (int n = 0; n < HEAD_DIM / 16; n++) {
 #pragma unroll
       for (int frag_idx = 0; frag_idx < 8; frag_idx++) {
-        s_o_buffer[m * NUM_THREADS * 64 + threadIdx.x * 64 + n * 8 + frag_idx] =
-            o[m][n][frag_idx];
+        s_o_buffer[(m * NUM_THREADS + threadIdx.x) * S_O_STRIDE + n * 8 +
+                   frag_idx] = o[m][n][frag_idx];
       }
     }
   }
@@ -651,9 +656,9 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
                  other_d * ptx_exp2(other_m - m_global);
       // accumulate o
       float other_o =
-          s_o_buffer[(row / 16) * NUM_THREADS * 64 // mma iter m
-                     + local_idx * 32 * 64         // 32 threads per local value
-                     + t_idx * 64                  // corresponding thread
+          s_o_buffer[(row / 16) * NUM_THREADS * S_O_STRIDE // mma iter m
+                     + local_idx * 32 * S_O_STRIDE // 32 threads per local value
+                     + t_idx * S_O_STRIDE          // corresponding thread
                      + mma_iter_n * 8              // mma iter n
                      + frag_idx];
       o_global = o_global * ptx_exp2(m_prev - m_global) +
